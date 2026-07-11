@@ -11,13 +11,18 @@ Run everything from the repo root. You need two terminals: **T1** runs the dev s
 - AT-4 through AT-7 need **US market hours** (9:30–16:00 ET, Mon–Fri) — live IEX ticks only flow then.
 - The Alpaca account is a **paper** account. Verify: base URL in code is `paper-api.alpaca.markets`. No test in this document may ever place a real-money order.
 
-Conventions used below:
+Conventions used below (eve dev serves on **port 2000**):
 
 ```bash
-CHAT()  { curl -s -X POST localhost:3000/catalog/chat -H 'content-type: application/json' -d "$1"; }
-SUBS()  { curl -s localhost:3000/catalog/subscriptions | jq .; }
-STREAM(){ curl -sN localhost:3000/catalog/sessions/$1/stream; }
+CHAT()  { curl -s -X POST localhost:2000/catalog/chat -H 'content-type: application/json' -d "$1"; }
+SUBS()  { curl -s localhost:2000/catalog/subscriptions | jq .; }
+STREAM(){ curl -sN localhost:2000/catalog/sessions/$1/stream; }
 ```
+
+⚠️ `eve dev` hot-reloads whenever `.env.local` changes, wiping in-process state (the subscription
+registry and any live watchers). Do not touch `.env.local` while tests are running. The
+`VERCEL_OIDC_TOKEN` expires after ~12h — refresh with `vercel env pull` BEFORE a test session,
+never during one.
 
 ---
 
@@ -26,10 +31,10 @@ STREAM(){ curl -sN localhost:3000/catalog/sessions/$1/stream; }
 **Covers:** task 1 (eve scaffold).
 
 1. [ ] `pnpm install` completes without errors; `package.json` pins an exact `eve` version (no `^`/`~`).
-2. [ ] `pnpm dev` starts the dev server; note the port (expected 3000 — if different, adjust all commands).
-3. [ ] `curl -s localhost:3000/eve/v1/health` returns a healthy response.
+2. [ ] `pnpm dev` starts the dev server on port 2000.
+3. [ ] `curl -s localhost:2000/eve/v1/health` returns a healthy response.
 4. [ ] Create a session on the built-in channel and get a model reply (proves model/AI-Gateway wiring):
-       `curl -s -X POST localhost:3000/eve/v1/session -H 'content-type: application/json' -d '{"message":"Say hello in one word."}'`
+       `curl -s -X POST localhost:2000/eve/v1/session -H 'content-type: application/json' -d '{"message":"Say hello in one word."}'`
        A coherent reply arrives (via response or stream).
 5. [ ] `docs/prd-draft.md` and this file are untouched by the scaffold.
 
