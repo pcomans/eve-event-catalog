@@ -4,22 +4,27 @@
   "type": "module",
   "imports": {
     "#*": "./agent/*",
-    "#evals/*": "./evals/*"
+    "#evals/*": "./evals/*",
+    "#catalog/*": "./catalog/*"
   },
   "scripts": {
     "build": "eve build",
     "dev": "eve dev --no-ui",
     "start": "eve start",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "test": "node --test catalog/*.test.ts"
   },
   "dependencies": {
+    "@upstash/redis": "1.38.0",
     "@vercel/connect": "0.2.2",
     "ai": "^7.0.0",
+    "ajv": "8.20.0",
     "eve": "0.22.5",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "24.x",
+    "microsandbox": "^0.6.6",
     "typescript": "7.0.2"
   },
   "overrides": {
@@ -28,5 +33,4 @@
   "engines": {
     "node": "24.x"
   }
-
 }

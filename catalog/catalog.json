@@ -1,0 +1,100 @@
+{
+  "eventTypes": [
+    {
+      "provider": "alpaca",
+      "event": "price.crossesBelow",
+      "status": "planned",
+      "description": "Fires once when a stock's live trade price crosses from at-or-above a threshold to strictly below it. Edge-triggered: if the price is already below the threshold when the subscription arms, it does not fire on that fact alone — it waits for an actual downward crossing. Set `resource` to the ticker symbol and `params.threshold` to the price level.",
+      "params": {
+        "type": "object",
+        "properties": {
+          "threshold": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Price level in USD. Fires when the trade price crosses from at-or-above this value to below it."
+          }
+        },
+        "required": ["threshold"],
+        "additionalProperties": false
+      },
+      "tags": ["price", "stock", "threshold", "crossing", "market-data", "realtime", "nvda"],
+      "metadata": {
+        "freshness": "realtime",
+        "latency": "websocket, sub-second",
+        "auth": "Alpaca paper API keys",
+        "cost": "free (paper account, IEX feed)",
+        "durability": "in-process watcher; lost on server restart"
+      }
+    },
+    {
+      "provider": "alpaca",
+      "event": "price.crossesAbove",
+      "status": "planned",
+      "description": "Fires once when a stock's live trade price crosses from at-or-below a threshold to strictly above it. Edge-triggered, mirrors price.crossesBelow. Set `resource` to the ticker symbol and `params.threshold` to the price level.",
+      "params": {
+        "type": "object",
+        "properties": {
+          "threshold": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Price level in USD. Fires when the trade price crosses from at-or-below this value to above it."
+          }
+        },
+        "required": ["threshold"],
+        "additionalProperties": false
+      },
+      "tags": ["price", "stock", "threshold", "crossing", "market-data", "realtime", "nvda"],
+      "metadata": {
+        "freshness": "realtime",
+        "latency": "websocket, sub-second",
+        "auth": "Alpaca paper API keys",
+        "cost": "free (paper account, IEX feed)",
+        "durability": "in-process watcher; lost on server restart"
+      }
+    },
+    {
+      "provider": "alpaca",
+      "event": "order.filled",
+      "status": "planned",
+      "description": "Fires once when a submitted paper order reaches filled status. Set `resource` to the Alpaca order id returned by submit_order.",
+      "params": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "tags": ["order", "trade", "fill", "paper-trading"],
+      "metadata": {
+        "freshness": "near-realtime",
+        "latency": "3s poll of GET /v2/orders/:id",
+        "auth": "Alpaca paper API keys",
+        "cost": "free (paper account)",
+        "durability": "in-process poller; lost on server restart"
+      }
+    },
+    {
+      "provider": "edgar",
+      "event": "filing.new",
+      "status": "planned",
+      "description": "Fires when SEC EDGAR publishes a new filing for a company. Set `resource` to the ticker symbol (resolved to a CIK internally). Optionally set `params.formTypes` to filter to specific forms, e.g. [\"8-K\"].",
+      "params": {
+        "type": "object",
+        "properties": {
+          "formTypes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional filter, e.g. [\"8-K\", \"10-Q\"]. Omit to match any filing type."
+          }
+        },
+        "additionalProperties": false
+      },
+      "tags": ["sec", "filing", "regulatory", "8-k", "10-q", "10-k"],
+      "metadata": {
+        "freshness": "minutes",
+        "latency": "~30s poll of data.sec.gov",
+        "auth": "none (descriptive User-Agent header only)",
+        "cost": "free",
+        "durability": "in-process poller; lost on server restart"
+      }
+    }
+  ]
+}

@@ -1,17 +1,14 @@
 import { defineChannel, GET, POST } from "eve/channels";
 
+import { getConversation, listSubscriptions, recordConversation } from "#catalog/registry.ts";
+import { armPendingForConversation } from "#catalog/wake.ts";
+
 // The catalog channel owns the demo conversation: it starts each session on a
 // stable, caller-chosen `conversationId` and later "wakes" it by sending
-// another message on that same token (see docs/channels/custom.mdx). Tracking
-// which conversationIds we've actually started lets /catalog/wake refuse to
-// wake an unknown id instead of silently starting a fresh session.
-interface ConversationRecord {
-  sessionId: string;
-  startedAt: string;
-}
-
-const conversations = new Map<string, ConversationRecord>();
-
+// another message on that same token (see docs/channels/custom.mdx). The
+// conversationId -> sessionId map lives in Redis (catalog/registry.ts), not
+// an in-process Map: eve's dev server hot-reloads (and wipes in-process
+// state) on every .env.local write, and this link is the wake address.
 function log(line: string) {
   console.log(`[catalog] ${line}`);
 }
@@ -25,9 +22,7 @@ export default defineChannel({
       };
 
       const session = await send(message, { auth: null, continuationToken: conversationId });
-
-      const startedAt = conversations.get(conversationId)?.startedAt ?? new Date().toISOString();
-      conversations.set(conversationId, { sessionId: session.id, startedAt });
+      await recordConversation(conversationId, session.id);
 
       log(`chat conv=${conversationId} session=${session.id}`);
 
@@ -61,7 +56,10 @@ export default defineChannel({
 
     // Resumes a parked session from outside the conversation, e.g. a fired
     // subscription. `payload` is folded into a machine-originated message so
-    // the agent can tell this wasn't typed by the user.
+    // the agent can tell this wasn't typed by the user. This is the single
+    // implementation of "deliver a wake" — catalog/wake.ts's internal
+    // callers (expiry timers, provider ticks) call this same route over
+    // HTTP rather than duplicating it.
     POST("/catalog/wake", async (req, { send }) => {
       const {
         conversationId,
@@ -73,7 +71,7 @@ export default defineChannel({
         subscribedAt?: string;
       };
 
-      const known = conversations.get(conversationId);
+      const known = await getConversation(conversationId);
       if (!known) {
         log(`wake FAILED conv=${conversationId} reason=unknown-conversation`);
         return Response.json(
@@ -83,12 +81,15 @@ export default defineChannel({
       }
 
       const firedAt = new Date().toISOString();
+      // subscribedAt override is an explicit top-level request field (real
+      // subscriptions pass their armedAt); payload is spread first so a
+      // fired subscription's own field names can never shadow the
+      // channel-generated timestamps below.
       const subscribedAt = subscribedAtOverride ?? known.startedAt;
       const wakeMessage = `[event-catalog wake] ${JSON.stringify({
+        ...payload,
         subscribedAt,
         firedAt,
-        now: firedAt,
-        ...payload,
       })}`;
 
       const session = await send(wakeMessage, { auth: null, continuationToken: conversationId });
@@ -110,5 +111,23 @@ export default defineChannel({
 
       return Response.json({ conversationId, sessionId: session.id, firedAt });
     }),
+
+    GET("/catalog/subscriptions", async () => {
+      const subscriptions = await listSubscriptions();
+      return Response.json(subscriptions);
+    }),
   ],
+
+  events: {
+    // Subscriptions stay "pending" during the agent's turn and only arm once
+    // the turn ends — arming mid-turn would race a tick against a session
+    // that hasn't parked yet. `channel.continuationToken` is the runtime's
+    // fully-qualified token ("catalog:<conversationId>"), not the raw
+    // conversationId route handlers pass to `send()` — the framework
+    // prepends the channel name (see docs/channels/custom.mdx).
+    async "turn.completed"(_data, channel) {
+      const conversationId = channel.continuationToken.slice("catalog:".length);
+      await armPendingForConversation(conversationId);
+    },
+  },
 });
