@@ -48,9 +48,12 @@ security rule below), never derived from `payload`. Full design:
    without a registered provider are `"status": "planned"`; `assertCatalogHonesty()` must fail
    the boot if an "active" entry has no handler. Never advertise what isn't implemented. Each
    entry's `onWake` guidance is likewise catalog-owned and the only trusted source of wake-time
-   instructions — `wake.ts`'s `resolveWakeGuidance` resolves it from the subscription's own
-   Ajv-validated `provider`/`event`, never from `payload`/`snapshot` (external, provider-supplied
-   data at fire time).
+   instructions — closed by construction, not just documented: `/catalog/wake` rejects (400) any
+   request that supplies its own `guidance` field, and resolves it itself
+   (`resolveGuidanceForWakeRequest`, `wake.ts`) from the subscription's own Ajv-validated
+   `provider`/`event`. The resolved text never touches the wire on its way in — only
+   `subscriptionId` + `reason` do — so `payload`/`snapshot` (external, provider-supplied data at
+   fire time) can never become instructions the agent is told to trust.
 5. **Tests are written red-green** (failing test first), node:test, no test-framework deps.
 6. **Check current versions before adding any dependency** (npm registry) — never install from
    memory. Pin eve exactly.

@@ -1,7 +1,12 @@
 import { defineChannel, GET, POST } from "eve/channels";
 
 import { getConversation, listSubscriptions, recordConversation } from "#catalog/registry.ts";
-import { armPendingForConversation, buildWakeEnvelope } from "#catalog/wake.ts";
+import {
+  armPendingForConversation,
+  buildWakeEnvelope,
+  rejectsCallerSuppliedGuidance,
+  resolveGuidanceForWakeRequest,
+} from "#catalog/wake.ts";
 import { assertCatalogHonesty } from "#catalog/catalog.ts";
 // Side-effecting imports: register the alpaca and edgar providers
 // (registerProvider(...)) at module load. ES module imports fully evaluate
@@ -68,19 +73,39 @@ export default defineChannel({
     // callers (expiry timers, provider ticks) call this same route over
     // HTTP rather than duplicating it.
     POST("/catalog/wake", async (req, { send }) => {
+      const body = (await req.json()) as {
+        conversationId: string;
+        payload?: Record<string, unknown>;
+        subscribedAt?: string;
+        firedAt?: string;
+        subscriptionId?: string;
+        reason?: "fired" | "expired";
+        guidance?: unknown;
+      };
+
+      // guidance is the one field the agent is told to trust as instructions
+      // rather than data (see AGENTS.md rule 4). This route is
+      // unauthenticated, so accepting a caller-supplied guidance string
+      // would be a trusted-instruction injection vector — reject outright
+      // (loud 400, not a silent overwrite) rather than resolve it here from
+      // the subscription instead. wake.ts's deliverWake never sends this
+      // field; only subscriptionId + reason, below.
+      if (rejectsCallerSuppliedGuidance(body)) {
+        log(`wake FAILED conv=${body.conversationId} reason=guidance-rejected`);
+        return Response.json(
+          { error: "guidance is resolved server-side from catalog.json; callers must not supply it" },
+          { status: 400 },
+        );
+      }
+
       const {
         conversationId,
         payload,
         subscribedAt: subscribedAtOverride,
         firedAt: firedAtOverride,
-        guidance,
-      } = (await req.json()) as {
-        conversationId: string;
-        payload?: Record<string, unknown>;
-        subscribedAt?: string;
-        firedAt?: string;
-        guidance?: string;
-      };
+        subscriptionId,
+        reason,
+      } = body;
 
       const known = await getConversation(conversationId);
       if (!known) {
@@ -97,16 +122,14 @@ export default defineChannel({
       // agent's envelope show the same timestamp); a synthetic wake with no
       // subscription (AT-2) mints its own. `payload` is nested under its
       // own key in buildWakeEnvelope, not spread, so nothing in it can ever
-      // shadow these two fields. `guidance` (for a real wake) is computed
-      // server-side by wake.ts's resolveWakeGuidance from the subscription's
-      // own catalog-validated provider/event — never from `payload` — and
-      // arrives here as this same kind of explicit top-level field; see
-      // AGENTS.md for the wake-guidance security boundary this preserves.
-      // This route itself is unauthenticated, consistent with the rest of
-      // this POC's local-only scope (see wake.ts's cross-instance-dedup
-      // note) — hardening it is a separate, explicitly out-of-scope concern.
+      // shadow these two fields. `guidance` is resolved HERE, from
+      // subscriptionId + reason, by looking the subscription up and reading
+      // catalog.json (resolveGuidanceForWakeRequest) — never trusted from
+      // the request body. A synthetic wake with no subscriptionId (AT-2)
+      // resolves to no guidance, which the agent handles gracefully.
       const subscribedAt = subscribedAtOverride ?? known.startedAt;
       const firedAt = firedAtOverride ?? new Date().toISOString();
+      const guidance = await resolveGuidanceForWakeRequest(subscriptionId, reason);
       const wakeMessage = `[event-catalog wake] ${JSON.stringify(buildWakeEnvelope(subscribedAt, firedAt, payload, guidance))}`;
 
       const session = await send(wakeMessage, { auth: null, continuationToken: conversationId });

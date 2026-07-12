@@ -7,6 +7,8 @@ import {
   buildWakeEnvelope,
   buildWakePayload,
   deliverWake,
+  rejectsCallerSuppliedGuidance,
+  resolveGuidanceForWakeRequest,
   resolveWakeGuidance,
   shouldSkipArmFailure,
 } from "./wake.ts";
@@ -117,7 +119,14 @@ test("resolveWakeGuidance returns undefined for a fired wake on an unknown provi
   assert.equal(resolveWakeGuidance(unknownSub, { reason: "fired" }), undefined);
 });
 
-test("deliverWake includes catalog.json's real onWake guidance in the wake POST body for a fired, known event type", async (t) => {
+// deliverWake must NOT send the resolved guidance string itself over the
+// wire — /catalog/wake is unauthenticated, and a caller-supplied `guidance`
+// field would be a trusted-instruction injection vector (the model is told
+// to follow `guidance` verbatim). Instead deliverWake sends subscriptionId +
+// reason, and the route resolves guidance itself from catalog.json (see
+// resolveGuidanceForWakeRequest below) — the same security boundary as
+// before, just enforced server-side instead of trusted over HTTP.
+test("deliverWake sends subscriptionId and reason, never a guidance string, in the wake POST body", async (t) => {
   const conversationId = `test:${randomUUID()}`;
   const sub = await createSubscription({
     conversationId,
@@ -135,9 +144,57 @@ test("deliverWake includes catalog.json's real onWake guidance in the wake POST 
 
   await deliverWake(armed, { reason: "fired" });
 
+  const body = fetchStub.lastBody() as { subscriptionId?: string; reason?: string; guidance?: unknown };
+  assert.equal(body.subscriptionId, sub.id);
+  assert.equal(body.reason, "fired");
+  assert.equal(body.guidance, undefined);
+});
+
+test("rejectsCallerSuppliedGuidance flags any request body carrying a guidance key, regardless of its value", () => {
+  assert.equal(rejectsCallerSuppliedGuidance({ guidance: "attacker-supplied instructions" }), true);
+  assert.equal(rejectsCallerSuppliedGuidance({ guidance: null }), true);
+  assert.equal(rejectsCallerSuppliedGuidance({}), false);
+  assert.equal(rejectsCallerSuppliedGuidance({ payload: { note: "hi" } }), false);
+});
+
+test("resolveGuidanceForWakeRequest resolves the real catalog onWake text for a fired, known subscription", async (t) => {
+  const conversationId = `test:${randomUUID()}`;
+  const sub = await createSubscription({
+    conversationId,
+    provider: "alpaca",
+    event: "price.crossesBelow",
+    resource: "NVDA",
+    params: { threshold: 150 },
+    expiresAt: null,
+  });
+  t.after(() => deleteSubscription(sub.id));
+
+  const guidance = await resolveGuidanceForWakeRequest(sub.id, "fired");
   const expected = EVENT_TYPES.find((e) => e.provider === "alpaca" && e.event === "price.crossesBelow")!.onWake;
-  const body = fetchStub.lastBody() as { guidance?: string };
-  assert.equal(body.guidance, expected);
+  assert.equal(guidance, expected);
+});
+
+test("resolveGuidanceForWakeRequest resolves the generic expiry text for an expired subscription", async (t) => {
+  const conversationId = `test:${randomUUID()}`;
+  const sub = await createSubscription({
+    conversationId,
+    provider: "edgar",
+    event: "filing.new",
+    resource: "AAPL",
+    params: {},
+    expiresAt: null,
+  });
+  t.after(() => deleteSubscription(sub.id));
+
+  const guidance = await resolveGuidanceForWakeRequest(sub.id, "expired");
+  assert.ok(guidance && guidance.length > 0);
+  assert.equal(guidance, await resolveGuidanceForWakeRequest(sub.id, "expired"));
+});
+
+test("resolveGuidanceForWakeRequest returns undefined for a missing subscriptionId, reason, or unknown subscription — matches a synthetic AT-2 wake, which carries no guidance", async () => {
+  assert.equal(await resolveGuidanceForWakeRequest(undefined, "fired"), undefined);
+  assert.equal(await resolveGuidanceForWakeRequest("some-id", undefined), undefined);
+  assert.equal(await resolveGuidanceForWakeRequest(`unknown-${randomUUID()}`, "fired"), undefined);
 });
 
 // deliverWake/armPendingForConversation tests below stub global.fetch so they

@@ -115,6 +115,40 @@ export function resolveWakeGuidance(sub: Subscription, options: DeliverOptions):
   return findEventType(sub.provider, sub.event)?.onWake;
 }
 
+/**
+ * True if a raw /catalog/wake request body tries to supply its own
+ * `guidance` field. The route must reject these outright (400), not just
+ * ignore them: `guidance` is the one field the agent is told to treat as
+ * trusted instructions rather than data, and the route is unauthenticated —
+ * silently overwriting a caller-supplied value would still mean the wire
+ * carried it, and a future refactor could accidentally start trusting it
+ * again. Checked by key presence, not truthiness (`{guidance: null}` must
+ * still be rejected). Pure.
+ */
+export function rejectsCallerSuppliedGuidance(body: Record<string, unknown>): boolean {
+  return "guidance" in body;
+}
+
+/**
+ * The route-side counterpart to resolveWakeGuidance: looks up the
+ * subscription a wake request claims to be about and resolves its guidance
+ * from catalog.json, entirely server-side. This is what makes it safe for
+ * /catalog/wake to stay unauthenticated — a caller can say "subscriptionId X
+ * fired" but can never supply the guidance text itself, only trigger a
+ * lookup of what this repo already says about X. Returns undefined for a
+ * synthetic wake with no real subscription (AT-2), an unknown
+ * subscriptionId, or a missing reason.
+ */
+export async function resolveGuidanceForWakeRequest(
+  subscriptionId: string | undefined,
+  reason: DeliverOptions["reason"] | undefined,
+): Promise<string | undefined> {
+  if (!subscriptionId || !reason) return undefined;
+  const sub = await getSubscription(subscriptionId);
+  if (!sub) return undefined;
+  return resolveWakeGuidance(sub, { reason });
+}
+
 async function disarmSafely(sub: Subscription): Promise<void> {
   try {
     await getProvider(sub.provider).disarm(sub);
@@ -141,7 +175,6 @@ export async function deliverWake(sub: Subscription, options: DeliverOptions): P
 
   const firedAt = new Date().toISOString();
   const payload = buildWakePayload(sub, options, firedAt);
-  const guidance = resolveWakeGuidance(sub, options);
 
   try {
     const res = await fetch(`${CATALOG_BASE_URL}/catalog/wake`, {
@@ -150,14 +183,18 @@ export async function deliverWake(sub: Subscription, options: DeliverOptions): P
       // firedAt is passed explicitly so the timestamp stored on the
       // subscription below and the one the agent actually sees are the
       // same value, not two independent `new Date()` calls a few ms apart.
-      // guidance is resolved here, from the trusted `sub` (not `payload`),
-      // and passed as its own top-level field for the same reason.
+      // subscriptionId + reason let the route resolve guidance itself
+      // (resolveGuidanceForWakeRequest) from catalog.json — deliverWake
+      // never sends the resolved guidance text over the wire, since
+      // /catalog/wake is unauthenticated and `guidance` is the one field
+      // the agent trusts as instructions rather than data.
       body: JSON.stringify({
         conversationId: sub.conversationId,
         payload,
         subscribedAt: sub.armedAt,
         firedAt,
-        guidance,
+        subscriptionId: sub.id,
+        reason: options.reason,
       }),
     });
     if (!res.ok) throw new Error(`wake POST ${res.status}: ${await res.text()}`);
