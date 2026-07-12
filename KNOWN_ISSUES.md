@@ -137,3 +137,9 @@ oversight:
   active subscriptions in Redis survive, but their parked sessions do not; re-subscribe.
 - Live IEX market data only flows during US market hours (9:30–16:00 ET, Mon–Fri). Off-hours,
   price subscriptions arm but never fire, and notional market orders won't fill.
+- `POST /catalog/wake` is unauthenticated, consistent with this POC's local-only,
+  no-cross-instance-auth scope (see #7's cross-instance dedup note). This means the `guidance`
+  field a real wake carries (AGENTS.md rule 4) could in principle be spoofed by anyone who can
+  reach the route directly, not just by `wake.ts`'s own internal caller — the same is already
+  true of `payload`/`subscribedAt`/`firedAt`. Hardening this route (e.g. a shared secret) is a
+  separate, out-of-scope concern for the demo, not something this rule's design fixes.

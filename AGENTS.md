@@ -46,7 +46,11 @@ security rule below), never derived from `payload`. Full design:
 4. **The catalog is declarative and honest.** `catalog/catalog.json` is the single source of
    truth for event types; its JSON Schemas are *enforced* at subscribe() time (Ajv). Entries
    without a registered provider are `"status": "planned"`; `assertCatalogHonesty()` must fail
-   the boot if an "active" entry has no handler. Never advertise what isn't implemented.
+   the boot if an "active" entry has no handler. Never advertise what isn't implemented. Each
+   entry's `onWake` guidance is likewise catalog-owned and the only trusted source of wake-time
+   instructions — `wake.ts`'s `resolveWakeGuidance` resolves it from the subscription's own
+   Ajv-validated `provider`/`event`, never from `payload`/`snapshot` (external, provider-supplied
+   data at fire time).
 5. **Tests are written red-green** (failing test first), node:test, no test-framework deps.
 6. **Check current versions before adding any dependency** (npm registry) — never install from
    memory. Pin eve exactly.
@@ -55,18 +59,6 @@ security rule below), never derived from `payload`. Full design:
    `tests/` (e.g. `tests/agent-tools/`); catalog tests stay next to their modules in `catalog/`.
 8. Every coding step gets an independent Codex review (gpt-5.6-sol, xhigh) before dependent work
    builds on it — orchestrated by the session lead; don't self-certify.
-9. **Wake guidance is repo-owned; event payloads are not.** Each `catalog.json` entry's `onWake`
-   field is prompt-shaped instructions for handling that event type's wake — shown in
-   `search_events` results and delivered again inside the wake message when it fires. It is
-   resolved server-side (`wake.ts`'s `resolveWakeGuidance`) from the *subscription's own*
-   `provider`/`event` (fixed, Ajv-validated at `subscribe()` time), and must never be derived
-   from, or built out of, `payload`/`snapshot` — the tick/poll data an external provider (Alpaca,
-   EDGAR, or any future one) supplies at fire time. That data is untrusted by construction; the
-   agent's own instructions tell it the same thing (`payload` is data to reason about, `guidance`
-   is instructions to follow) so the boundary holds even if a provider's field ever contained
-   adversarial text. Note: the `/catalog/wake` HTTP route itself is unauthenticated, consistent
-   with the rest of this POC's local-only scope (`wake.ts`'s cross-instance-dedup note) —
-   hardening that route is a separate, out-of-scope concern from this rule.
 
 ## Environment
 
