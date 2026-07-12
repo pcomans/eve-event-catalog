@@ -149,12 +149,18 @@ and #3's Nitro caveat. New gate 7 (unbounded-workflow API) is the only fresh res
    eve ships a headless hook (`useEveAgent`) + reducer, NOT a prebuilt chat page — read-only =
    render with the reducer, never render a composer, never call `send`. Equity/positions/
    subscriptions/feed have no eve equivalent → custom Next.js over Redis + Alpaca account.
-7. **NEW — unbounded-workflow primitive (open; run before Phase 2).** The always-on story (both
-   the connector's chained socket sessions AND the perpetual campaign) rests on one mechanism:
-   how the public `workflow@4.6.0` package expresses "run forever" (ChatPRD/Rauch: "run forever
-   until I run out of tokens" — [link](https://www.chatprd.ai/how-i-ai/vercel-ceo--guillermo-rauchs-production-ready-v0-workflows)).
-   Pin the exact API: `step.sleep` + recursion loop vs an explicit continue-as-new vs chained
-   invocation, and where duration/step ceilings actually bite. Answer shapes Phase 2 & 4.
+7. **Unbounded-workflow primitive: RESOLVED (gate7-research, 2026-07-12).** Full findings in
+   `docs/architecture.md` ("How workflow@4.6.0 expresses 'forever'"). Short version: no
+   `continueAsNew` — run-forever is **recursion across runs** (final step calls
+   `start(sameWorkflow, [state])` and returns; per-run ceilings 25k events / 10k steps / 240s
+   replay reset each run; chain before ~2,000 events). `sleep()` and run duration are unlimited.
+   A ws-holding step is capped by the **Fluid function ceiling** (800s GA → ~12-min sessions;
+   1800s beta for 25-min). Steps are stateless + retry from the top → through-write inside the
+   step, idempotent writes, socket drop = graceful return not throw. Nitro/Vite adapters exist —
+   no Next.js needed for the connector service. **Carry-over caveat: verify vercel/workflow
+   issue #634 (sleep-resume failures) on a preview deploy early in Phase 2** — affects the EDGAR
+   sleep(30s) sweep and campaign cadence; fall back to hook/`wakeUp()`-driven resumes if it
+   reproduces.
 
 Phase 0 outputs go into `docs/architecture.md`. Both topology forks are now decided (above); any
 *new* fork that emerges mid-build STOPs and asks Philipp before committing (decision 5).

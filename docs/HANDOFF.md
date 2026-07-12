@@ -65,12 +65,12 @@ Full findings are in the plan's Phase 0 section. Key facts the build depends on:
 
 ## Open threads (carry into the build — none block starting)
 
-1. **Gate 7 — the "run forever" API is not yet pinned.** The always-on story (connector socket
-   sessions AND the perpetual campaign) rests on how the public `workflow@4.6.0` package expresses
-   unbounded execution: `step.sleep` + recursion vs explicit continue-as-new vs chained
-   invocation, and where duration/step ceilings bite. Validated in shape by ChatPRD/Rauch ("run
-   forever until I run out of tokens") but the API is unverified. **Resolve before Phase 2.**
-   (Philipp was offered a research agent for this pre-reset; decide whether to run it now.)
+1. ~~Gate 7 — the "run forever" API~~ **RESOLVED 2026-07-12** (gate7-research): recursion across
+   runs via `start(self, [state])` in the final step (no `continueAsNew`); chain before ~2,000
+   events; ws steps capped by Fluid ceiling (800s GA ≈ 12-min sessions); steps retry from the
+   top → through-write + idempotent + drop=return. Full findings:
+   `docs/architecture.md` ("How workflow@4.6.0 expresses 'forever'"). One carry-over: verify
+   vercel/workflow issue #634 (sleep-resume) on a preview deploy early in Phase 2.
 2. **world-vercel pre-park buffering (KNOWN_ISSUES #7)** — structurally likely to hold (eve's
    buffering is world-agnostic), but the network round-trip changes the race window. **Hard
    test on a real preview deploy before trusting arming (Phase 6 gate).**

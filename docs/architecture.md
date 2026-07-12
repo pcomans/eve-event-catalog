@@ -390,6 +390,46 @@ four problems need real designs — they are correctness issues, not polish:
 Cost is not the blocker (an always-on Standard instance is roughly $15–20/month before active
 CPU; market-hours-only is less). The design work is.
 
+### How `workflow@4.6.0` expresses "forever" (gate 7 — resolved 2026-07-12)
+
+Research verified against the actual `workflow@4.6.0` / `@workflow/core@4.6.0` tarballs and
+Vercel's live docs (full report in the session transcript; key sources:
+vercel.com/docs/workflows/pricing, /docs/workflows/concepts, /docs/functions/limitations,
+github.com/vercel/workflow).
+
+- **There is no `continueAsNew` primitive.** Run-forever = **recursion across runs**: the
+  workflow's final step calls `start(sameWorkflow, [state])` (`workflow/api`) and returns. Each
+  fresh run resets the per-run ceilings. This is exactly the mechanism behind Rauch's
+  "runs forever" chess demo (last step starts a new run).
+- **Per-run ceilings that kill an in-run `while(true)`**: 25,000 events hard cap (a step costs 3
+  events, a sleep 2), 10,000 steps, 240s max replay. Practical guidance from Vercel: chain to a
+  new run well before ~2,000 events. Run duration and `sleep()` duration are **unlimited**.
+- **A websocket-holding step is capped by the Fluid function ceiling**, not by Workflows: Pro
+  800s GA, 1800s beta (needs per-function `maxDuration` config; unsupported with Secure
+  Compute/Static IPs). So socket sessions are **~12–13 min on GA**, 25+ min only on the beta
+  ceiling. Shorter sessions just mean more chaining + more gap replays — acceptable.
+- **Steps are stateless and retry from the top** (3 auto-retries by default; `RetryableError` /
+  `FatalError` to tune). Consequences for the connector: write events through to the registry
+  *as they arrive inside the step* (never batch at step end), make all writes idempotent, and
+  treat a socket drop as a graceful `return` (let the loop reopen) — reserve `throw` for genuine
+  connect failures so a 12-minute session is never re-run from scratch over a last-minute close.
+- **Waiting/interruption**: `sleep()` (durable, unlimited), `createHook()`/`createWebhook()`
+  (park until external push via `resumeHook`/webhook URL), `Run.wakeUp()` (interrupt a pending
+  sleep from outside). Stop a perpetual loop by checking a flag/hook in-run and returning
+  instead of re-invoking.
+- **No Next.js required**: 4.6.0 ships adapters for Next, Nuxt, **Nitro**, SvelteKit, Astro,
+  Nest, and Vite/Rollup; a minimal standalone Vercel Service can use the Nitro or Vite path.
+- **⚠️ Open bug to verify before relying on frequent `sleep()`**: vercel/workflow **issue #634**
+  ("Steps Don't Run After Sleep" — resume sometimes fails, worse around the ~30-min mark;
+  reported on 4.0.1-beta.32, fix status in 4.6.0 unconfirmed). Affects the EDGAR sleep(30s)
+  sweep and any campaign cadence — smoke-test sleep-resume on a preview deploy early in Phase 2,
+  and prefer hook/`wakeUp()`-driven resumes over many small sleeps if it reproduces.
+
+Shape for both consumers: **bounded loop of N steps inside a run (keep events < ~2,000), then
+`return await start(self, [cursor|state])`** — the connector chains socket-session steps with
+the cursor as carried state; the campaign chains tick/sleep rounds with a stop-check step each
+round.
+
 ### Prior art — every layer exists somewhere, the stack exists nowhere
 
 The case for building this *into eve* is that competitors already ship the pieces:
