@@ -1,9 +1,9 @@
 # Event Catalog
 
-**Connections are how agents call the world; the Event Catalog is how the world calls back.**
+**Tool calls are how agents call the world; the Event Catalog is how the world calls back.**
 
 AI agents are excellent at reacting *now* and terrible at reacting *later*. This POC gives an
-[eve](https://eve.dev) agent the missing primitive: **"wake me when X becomes true."** The agent
+[eve](https://eve.dev) agent the missing primitive: **"wake me when X happens."** The agent
 discovers event sources it knows nothing about, subscribes with typed predicates, suspends
 (durably, at zero compute), and is resumed by the catalog when the event fires — interrupts for
 AI agents. The vertical slice is agentic trading: Alpaca paper trading + SEC EDGAR filings.
