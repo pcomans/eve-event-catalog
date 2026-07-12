@@ -1,6 +1,6 @@
 # Event Catalog POC (on eve)
 
-An **Event Catalog** lets AI agents say "wake me when X becomes true": discover event sources,
+An **Event Catalog** lets AI agents say "wake me when X happens": discover event sources,
 subscribe, suspend, and get woken by the catalog when the predicate fires. Vertical slice:
 agentic trading (Alpaca paper trading + SEC EDGAR). PRD: `docs/prd-draft.md`.
 

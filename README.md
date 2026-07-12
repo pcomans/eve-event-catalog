@@ -23,7 +23,34 @@ them by a *continuation token*, which is the key that resumes a parked session. 
 runs locally in dev, including the workflow engine (eve's `world-local` backend) — "durable" does
 not mean "in Vercel's cloud" here.
 
-## System architecture
+## The big picture
+
+```mermaid
+flowchart LR
+    A["Agent
+    a durable conversation —
+    sleeps between events, at zero compute"]
+    C["Event Catalog
+    a JSON file of things worth waiting for
+    + the machinery that watches them"]
+    W["The world
+    markets · orders · SEC filings"]
+
+    A -->|"① what can I wait for?"| C
+    A -->|"② wake me when X happens"| C
+    C -->|"③ watches (streams, polls)"| W
+    C -->|"④ X happened — wake up"| A
+```
+
+That's the whole idea. The agent never polls, never holds a connection, never knows Alpaca or
+SEC exist — it asks the catalog what can be waited for, subscribes, and goes to sleep. The
+catalog does the watching and calls back. One naming note: the user also talks to the agent
+*through* the catalog's channel (`/catalog/chat`) — not because chat is a catalog concern, but
+because in eve only the channel that started a conversation can resume it, and the catalog must
+be able to resume conversations to wake them.
+
+<details>
+<summary><b>Under the hood</b> — the full component map</summary>
 
 ```mermaid
 flowchart TB
@@ -75,6 +102,8 @@ flowchart TB
     agent -.->|"spans"| LS
     User -->|"inspect"| SUBS
 ```
+
+</details>
 
 Key moves, bottom to top:
 
@@ -288,6 +317,9 @@ This is a local-first POC, and says so:
   visible in `GET /catalog/subscriptions` (status `failed` + `lastError`), not pushed anywhere.
 - Trading is hard-coded to Alpaca's **paper** host. Notional, buy-side, market/day orders only,
   every order behind a human approval gate. There is no code path to real money.
+- Only conversations started on the catalog's own channel are wakeable (eve channels own their
+  continuation tokens). Wiring another surface — Slack, a web UI — would need cross-channel
+  wakes; out of scope here.
 - At production scale, one seam changes: `deliverWake` becomes a publish to a durable topic
   (Vercel Queues) — fired events are low-volume and must-not-lose, while raw ticks stay filtered
   at the provider edge. The claim/idempotency semantics were built for at-least-once delivery
