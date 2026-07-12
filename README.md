@@ -17,11 +17,10 @@ The agent finds the right event source in the catalog, subscribes, parks, wakes 
 cross, re-checks reality, paper-trades autonomously within the stated mandate, parks again, and
 reports the fill — without a single polling loop in agent code and without a human in the loop.
 
-**eve in three sentences** (enough to read the diagrams; the rest is at [eve.dev](https://eve.dev)):
-an eve *session* is a durable workflow — a conversation that can pause ("park") for hours at zero
-compute and survive restarts. A *channel* is an HTTP surface that owns conversations; it addresses
-them by a *continuation token*, which is the key that resumes a parked session. Everything below
-runs locally in dev, including the workflow engine (eve's `world-local` backend) — "durable" does
+**eve in two sentences** (enough to read the diagrams; the rest is at [eve.dev](https://eve.dev)):
+an eve *session* is a durable conversation — it can pause ("park") for hours at zero compute,
+survive restarts, and be resumed later by whoever holds its resume key (the *continuation
+token*). Everything below runs locally in dev, including the workflow engine — "durable" does
 not mean "in Vercel's cloud" here.
 
 ## The big picture
@@ -45,10 +44,10 @@ flowchart LR
 
 That's the whole idea. The agent never polls, never holds a connection, never knows Alpaca or
 SEC exist — it asks the catalog what can be waited for, subscribes, and goes to sleep. The
-catalog does the watching and calls back. One naming note: the user also talks to the agent
-*through* the catalog's channel (`/catalog/chat`) — not because chat is a catalog concern, but
-because in eve only the channel that started a conversation can resume it, and the catalog must
-be able to resume conversations to wake them.
+catalog does the watching and calls back. You talk to the agent with `POST /catalog/chat`
+(each `conversationId` is one ongoing conversation); it lives next to `/catalog/wake` because
+of an eve rule: only whoever *starts* a conversation holds the key to *resume* it — and the
+catalog must hold that key to wake sleeping agents.
 
 <details>
 <summary><b>Under the hood</b> — the full component map</summary>
@@ -58,7 +57,7 @@ flowchart TB
     User(["User / curl"])
 
     subgraph app["eve app — local dev server :2000"]
-        subgraph channel["catalog channel (owns conversations)"]
+        subgraph channel["conversation API (an eve 'channel' — holds the resume keys)"]
             CHAT["POST /catalog/chat"]
             WAKE["POST /catalog/wake"]
             SUBS["GET /catalog/subscriptions"]
@@ -135,7 +134,7 @@ Key moves, bottom to top:
 sequenceDiagram
     autonumber
     actor U as User
-    participant CH as catalog channel
+    participant CH as conversation API
     participant A as Agent (eve session)
     participant C as Event Catalog
     participant P as alpaca provider
@@ -289,8 +288,7 @@ Demo guidance: run during US market hours (9:30–16:00 ET); pick a threshold sl
 the current price (edge-triggered — it has to cross downward). Off-hours, `ALPACA_DATA_FEED=test`
 (restart required) streams Alpaca's 24/7 synthetic ticker `FAKEPACA` through the same pipeline —
 useful for watching connect/seed/arm and tick flow, but note its price prints flat in practice,
-so *crossings* won't fire on it; expiry wakes, EDGAR wakes, and the approval flow all work any
-time.
+so *crossings* won't fire on it; expiry wakes and EDGAR wakes work any time.
 
 <!-- TODO after the supervised live demo (task 7): paste the two real AT-7 run transcripts here. -->
 
@@ -317,9 +315,9 @@ This is a local-first POC, and says so:
   user's stated amount and require the post-wake re-check. There is no code path to real money.
   (eve's approval gate is one line to restore — `approval: always()` on the tool — or a policy
   function for bounded autonomy, e.g. auto-approve only within the mandate.)
-- Only conversations started on the catalog's own channel are wakeable (eve channels own their
-  continuation tokens). Wiring another surface — Slack, a web UI — would need cross-channel
-  wakes; out of scope here.
+- Only conversations started through `/catalog/chat` are wakeable (the resume key stays with
+  whoever starts a conversation — an eve rule). Wiring another surface — Slack, a web UI —
+  would need cross-surface wakes; out of scope here.
 - At production scale, one seam changes: `deliverWake` becomes a publish to a durable topic
   (Vercel Queues) — fired events are low-volume and must-not-lose, while raw ticks stay filtered
   at the provider edge. The claim/idempotency semantics were built for at-least-once delivery

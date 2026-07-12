@@ -40,7 +40,7 @@ never during one.
 
 ## AT-2 — Wake loop on the catalog channel
 
-**Covers:** task 2 (the load-bearing mechanism: park + external wake + approval round-trip).
+**Covers:** task 2 (the load-bearing mechanism: park + external wake).
 
 1. [ ] Start a conversation:
        `CHAT '{"conversationId":"demo-1","message":"Reply with the word READY and nothing else."}'`
@@ -124,5 +124,5 @@ never during one.
 
 **Covers:** task 9.
 
-1. [ ] A tester who has NOT read this file or the plan can go from `git clone` to passing AT-7 using only `README.md` (env setup, market-hours caveat, threshold guidance, curl commands, approval instructions).
+1. [ ] A tester who has NOT read this file or the plan can go from `git clone` to passing AT-7 using only `README.md` (env setup, market-hours caveat, threshold guidance, curl commands).
 2. [ ] README states the runtime boundary plainly: eve sessions are durable; catalog watchers are in-process and local-only; restart = re-subscribe.
