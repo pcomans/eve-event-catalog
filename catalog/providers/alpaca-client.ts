@@ -129,27 +129,29 @@ export interface LatestTrade {
   timestamp: string;
 }
 
-// Last trade observed on the "test" feed's shared stream (populated by
-// catalog/providers/alpaca.ts's tick handler) — REST trades/latest has no
-// data for FAKEPACA at all, verified empirically against the live API:
-// feed=test is rejected as "invalid feed" for this endpoint, and feed=iex
-// returns "no trade found for FAKEPACA". This lets getLatestTrade still
-// answer truthfully under ALPACA_DATA_FEED=test once at least one tick has
-// arrived, instead of always failing.
-let lastTestFeedTrade: LatestTrade | null = null;
+// Last trade observed per symbol on the "test" feed's shared stream
+// (populated by catalog/providers/alpaca.ts's tick handler) — REST
+// trades/latest has no data for FAKEPACA at all, verified empirically
+// against the live API: feed=test is rejected as "invalid feed" for this
+// endpoint, and feed=iex returns "no trade found for FAKEPACA". This lets
+// getLatestTrade still answer truthfully under ALPACA_DATA_FEED=test once
+// that symbol has ticked at least once. Keyed by symbol (not a single
+// last-trade slot) so one symbol's price can never leak into another's.
+const testFeedTrades = new Map<string, LatestTrade>();
 
-export function recordTestFeedTrade(trade: LatestTrade): void {
-  lastTestFeedTrade = trade;
+export function recordTestFeedTrade(symbol: string, trade: LatestTrade): void {
+  testFeedTrades.set(symbol, trade);
 }
 
 export async function getLatestTrade(symbol: string, feed: DataFeed): Promise<LatestTrade> {
   if (feed === "test") {
-    if (!lastTestFeedTrade) {
+    const trade = testFeedTrades.get(symbol);
+    if (!trade) {
       throw new Error(
         `no test-feed trade observed yet for ${symbol} — the price stream hasn't ticked since this process started`,
       );
     }
-    return lastTestFeedTrade;
+    return trade;
   }
 
   const resp = await alpacaClient.marketData.stocks.stockLatestTradeSingle({ symbol, feed });

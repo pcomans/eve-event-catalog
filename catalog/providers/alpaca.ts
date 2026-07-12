@@ -72,7 +72,7 @@ function ensureStockStream(): StockDataStream {
  * not per watcher.
  */
 function handleTrade(trade: StreamTrade): void {
-  if (FEED === "test") recordTestFeedTrade({ price: trade.price, timestamp: trade.timestamp.toISOString() });
+  if (FEED === "test") recordTestFeedTrade(trade.symbol, { price: trade.price, timestamp: trade.timestamp.toISOString() });
 
   for (const state of priceSubs.values()) {
     if (state.symbol !== trade.symbol) continue;
@@ -110,18 +110,28 @@ async function armPriceCross(sub: Subscription): Promise<void> {
   const state: PriceState = { sub, direction, threshold, symbol, previous: null };
   priceSubs.set(sub.id, state);
 
-  const stream = ensureStockStream();
-  await stream.whenAuthenticated();
-  stream.subscribeForTrades([symbol]);
-  log(`subscribed feed=${FEED} trades=["${symbol}"]`);
+  // Any failure past this point must not leave a live subscription (or a
+  // symbol still subscribed on the stream) behind for a sub that's about to
+  // be marked "failed" — arm failures don't get a disarm() call for free.
+  try {
+    const stream = ensureStockStream();
+    const auth = await stream.whenAuthenticated();
+    if (!auth.authenticated) throw new Error(describeAuthFailure("market-data", auth));
 
-  if (FEED === "iex") {
-    const trade = await getLatestTrade(symbol, FEED);
-    state.previous = trade.price;
-    logCatalog("seeded", sub, { symbol, price: trade.price, source: "rest" });
+    stream.subscribeForTrades([symbol]);
+    log(`subscribed feed=${FEED} trades=["${symbol}"]`);
+
+    if (FEED === "iex") {
+      const trade = await getLatestTrade(symbol, FEED);
+      state.previous = trade.price;
+      logCatalog("seeded", sub, { symbol, price: trade.price, source: "rest" });
+    }
+    // On the "test" feed, `state.previous` stays null here and is seeded
+    // from the first stream tick instead (see handleTrade above).
+  } catch (err) {
+    disarmPriceCross(sub);
+    throw err;
   }
-  // On the "test" feed, `state.previous` stays null here and is seeded from
-  // the first stream tick instead (see handleTrade above).
 }
 
 function disarmPriceCross(sub: Subscription): void {
@@ -144,6 +154,12 @@ function orderSnapshot(order: AlpacaOrder): Record<string, unknown> {
   };
 }
 
+/** Formats a stream authentication failure for a thrown Error message. Pure. */
+export function describeAuthFailure(label: string, result: streaming.StreamAuthResult): string {
+  const code = result.code !== undefined ? ` code=${result.code}` : "";
+  return `${label} stream authentication failed: status=${result.status}${code} message=${result.message}`;
+}
+
 const TERMINAL_ORDER_STATUSES = new Set(["filled", "canceled", "rejected", "expired"]);
 // trade_updates event names, not order statuses — "fill" (not "filled") is
 // the completed-order event; "partial_fill" and everything else (new,
@@ -151,7 +167,34 @@ const TERMINAL_ORDER_STATUSES = new Set(["filled", "canceled", "rejected", "expi
 // isn't terminal for our purposes and is ignored.
 const TERMINAL_TRADE_EVENTS = new Set(["fill", "canceled", "rejected", "expired"]);
 
-const orderFilledSubs = new Map<string, Subscription>(); // orderId -> sub
+// orderId -> (subscriptionId -> sub). Keyed by subscription id, not object
+// identity: arm() and disarm() each receive their own freshly-deserialized
+// Subscription object (registry.ts's updateSubscription spreads a new
+// object per call), so two calls for "the same" subscription are never
+// reference-equal. A Set<Subscription> would silently fail to remove
+// entries on disarm. Nested by order id (not a flat Map<subId, Subscription>)
+// so multiple subscriptions can watch the same order without one
+// overwriting another's routing entry.
+type OrderFilledRegistry = Map<string, Map<string, Subscription>>;
+const orderFilledSubs: OrderFilledRegistry = new Map();
+
+/** Total subscriptions across every watched order — used to decide whether the shared stream can close. Pure. */
+export function countOrderFilledSubs(registry: ReadonlyMap<string, ReadonlyMap<string, Subscription>>): number {
+  let total = 0;
+  for (const subs of registry.values()) total += subs.size;
+  return total;
+}
+
+/** Which subscriptions a trade_updates event should wake, given the current registry. Pure. */
+export function subscriptionsForOrderUpdate(
+  registry: ReadonlyMap<string, ReadonlyMap<string, Subscription>>,
+  orderId: string | undefined,
+  event: string,
+): Subscription[] {
+  if (!orderId || !TERMINAL_TRADE_EVENTS.has(event)) return [];
+  const subs = registry.get(orderId);
+  return subs ? [...subs.values()] : [];
+}
 
 // One shared trading-updates connection for every order.filled subscription
 // — opened when the first one arms, closed when the last one disarms.
@@ -179,36 +222,60 @@ function ensureTradingStream(): TradingStream {
 }
 
 function handleTradeUpdate(update: TradeUpdate): void {
-  const orderId = update.order.id;
-  if (!orderId) return;
-  const sub = orderFilledSubs.get(orderId);
-  if (!sub) return; // an update for an order we're not watching (or already delivered)
-  if (!TERMINAL_TRADE_EVENTS.has(update.event)) return;
+  const snapshot = orderSnapshot(normalizeOrder(update.order));
+  for (const sub of subscriptionsForOrderUpdate(orderFilledSubs, update.order.id, update.event)) {
+    void deliverWake(sub, { reason: "fired", snapshot });
+  }
+}
 
-  void deliverWake(sub, { reason: "fired", snapshot: orderSnapshot(normalizeOrder(update.order)) });
+function registerOrderFilledSub(sub: Subscription): void {
+  const orderId = sub.resource;
+  let subs = orderFilledSubs.get(orderId);
+  if (!subs) {
+    subs = new Map();
+    orderFilledSubs.set(orderId, subs);
+  }
+  subs.set(sub.id, sub);
+}
+
+function unregisterOrderFilledSub(sub: Subscription): void {
+  const subs = orderFilledSubs.get(sub.resource);
+  if (!subs?.delete(sub.id)) return;
+  if (subs.size === 0) orderFilledSubs.delete(sub.resource);
 }
 
 async function armOrderFilled(sub: Subscription): Promise<void> {
-  const orderId = sub.resource;
+  // Register — and make sure the trade_updates stream is authenticated and
+  // listening — BEFORE the REST seed check below, not after. If the order
+  // went terminal while that REST call was in flight, its push event must
+  // find a routing entry already in place; a push for a transition that
+  // already happened never re-arrives. deliverWake's own claim guard
+  // (wake.ts) dedups if both this seed check and a push report the same
+  // terminal order.
+  registerOrderFilledSub(sub);
 
-  // REST survives only as the arm-time seed: if the order already reached a
-  // terminal state before this subscription armed (e.g. a market order that
-  // filled between submit and arm), wake immediately — a push event for a
-  // transition that already happened will never arrive on the stream.
-  const order = await getOrder(orderId);
-  if (TERMINAL_ORDER_STATUSES.has(order.status)) {
-    await deliverWake(sub, { reason: "fired", snapshot: orderSnapshot(order) });
-    return;
+  // Any failure past this point (auth rejection, a bad order id, ...) must
+  // not leave a live routing entry behind for a subscription that
+  // armPendingForConversation is about to mark "failed" — arm failures
+  // don't get a disarm() call to clean this up for us.
+  try {
+    const stream = ensureTradingStream();
+    const auth = await stream.whenAuthenticated();
+    if (!auth.authenticated) throw new Error(describeAuthFailure("trade-updates", auth));
+
+    const order = await getOrder(sub.resource);
+    if (TERMINAL_ORDER_STATUSES.has(order.status)) {
+      await deliverWake(sub, { reason: "fired", snapshot: orderSnapshot(order) });
+    }
+  } catch (err) {
+    unregisterOrderFilledSub(sub);
+    throw err;
   }
-
-  orderFilledSubs.set(orderId, sub);
-  const stream = ensureTradingStream();
-  await stream.whenAuthenticated();
 }
 
 function disarmOrderFilled(sub: Subscription): void {
-  if (!orderFilledSubs.delete(sub.resource)) return;
-  if (orderFilledSubs.size === 0 && tradingStream) {
+  unregisterOrderFilledSub(sub);
+  if (countOrderFilledSubs(orderFilledSubs) === 0 && tradingStream) {
     tradingStream.disconnect();
     tradingStream = null;
   }

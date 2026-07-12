@@ -56,7 +56,7 @@
       "provider": "alpaca",
       "event": "order.filled",
       "status": "active",
-      "description": "Fires once when a submitted paper order reaches filled status. Set `resource` to the Alpaca order id returned by submit_order.",
+      "description": "Fires once when a submitted paper order reaches a terminal state: filled, canceled, rejected, or expired — not filled alone, so the agent always learns the truth rather than waiting forever for a fill that will never come (the terminal status is included in the wake payload). Set `resource` to the Alpaca order id returned by submit_order. Delivered by Alpaca's trade_updates push stream; if the order is already terminal at the moment this subscription arms, it wakes immediately from a one-time REST check instead of waiting for a push event.",
       "params": {
         "type": "object",
         "properties": {},
@@ -64,11 +64,11 @@
       },
       "tags": ["order", "trade", "fill", "paper-trading"],
       "metadata": {
-        "freshness": "near-realtime",
-        "latency": "3s poll of GET /v2/orders/:id",
+        "freshness": "realtime",
+        "latency": "websocket push (trade_updates), sub-second; one-time REST check at arm",
         "auth": "Alpaca paper API keys",
         "cost": "free (paper account)",
-        "durability": "in-process poller; lost on server restart"
+        "durability": "in-process watcher; lost on server restart"
       }
     },
     {
