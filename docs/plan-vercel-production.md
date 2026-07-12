@@ -25,16 +25,23 @@ constraint (within reason).
 1. **Full realtime connector** — the Alpaca websockets stay realtime via Workflow-chained
    bounded socket sessions. NOT the polling fallback. All four correctness prerequisites below
    are in scope; they are the majority of the build.
-2. **Public site is read-only** — subscriptions + lifecycle, wake/event history feed,
-   conversation transcripts. Chat and subscribe remain private (secret-protected). No public
-   demo chat.
+2. **Public site is read-only** — subscriptions + lifecycle, wake/event history feed, and
+   **full conversation transcripts** (the agent's reasoning, tool calls, decisions all public —
+   confirmed 2026-07-12; "see it think" is the point). Chat and subscribe remain private
+   (secret-protected). No public demo chat.
 3. Standing process rules apply: Sonnet agents build/test (TDD red-green, node:test), the lead
    orchestrates and writes docs only, every coding step gets a Codex gate (gpt-5.6-sol, xhigh;
    split into narrow passes — long single-pass verdicts hang; kill the repo's codex broker tree
    on ≥3min silence and retry). Check current npm versions before adding any dependency. Verify
    `git log` before believing any agent's "done". Stage by full-diff review.
 4. Non-Vercel components require Philipp's explicit approval (AGENTS.md rule 2). Approved so
-   far: Upstash Redis, LangSmith.
+   far: Upstash Redis, LangSmith, Tavily.
+5. **Architecture forks require a check-in** (confirmed 2026-07-12). When Phase 0 (or later
+   research) forks the topology — e.g. same-app Workflows don't work → connector becomes a
+   sibling service — the build session **stops and asks Philipp** before committing to the
+   branch. Autonomy holds within a chosen topology; the topology choice itself is his call.
+6. **Vercel Pro is available** (confirmed 2026-07-12) — build against Pro-tier Fluid durations
+   (800s GA / 1800s beta), Vercel Queues (beta), and Cron. No need to constrain to Hobby limits.
 
 ## Current state (baseline: commit 09fbce4, pushed to github.com/pcomans/eve-event-catalog)
 
@@ -107,7 +114,9 @@ answer these; if their reports are in the prior session's transcript, use them, 
 6. Dashboard hosting pick: eve-channel-served HTML vs Vercel Services multi-app vs separate
    Next.js project on the same Redis.
 
-Phase 0 outputs go into `docs/architecture.md` and adjust Phases 2/4 below.
+Phase 0 outputs go into `docs/architecture.md` and adjust Phases 2/4 below. **If gate 1 or 6
+forks the topology (same-app Workflows fail → sibling service; dashboard hosting choice), STOP
+and ask Philipp before committing to the branch** (decision 5 above) — do not pick autonomously.
 
 ## Phases (each: build → tests green → live verification → Codex gate → commit/push)
 
@@ -133,10 +142,14 @@ sleep or sorted-set sweep. catalog.json freshness stays honest either way.
 - **Sell capability**: extend the order tools to position-bounded selling (market sell of held
   quantities only — no shorting, no margin; paper host stays hard-coded). This is a
   capability-bounds change: red-green tests + Codex gate scrutiny on the bounds.
-- **Campaign guardrails** (capability bounds, not judgment): per-trade notional cap, max trades
-  per day, max concurrent subscriptions, and a daily token/turn budget for the agent — all env-
-  configurable, all enforced in code (a runaway agent must be structurally impossible). Values:
-  propose defaults, Philipp confirms at deploy.
+- **Campaign guardrails — minimal (confirmed 2026-07-12: "it's paper, keep it light").** The one
+  cap that genuinely matters is a **daily token/turn budget** for the agent (cost + runaway
+  protection), enforced in code and env-configurable. The paper host + fully-autonomous open
+  mandate are the intended posture, so do NOT add per-trade notional caps, max-trades-per-day, or
+  max-concurrent-subscription limits as hard structural blockers — they constrain the very
+  autonomy that's the showcase. Keep the existing paper-only / buy-side / market / day-order
+  bounds that already exist (those are correctness, not judgment). Sell stays position-bounded
+  (below). If a single cost cap needs a number, propose one; Philipp confirms at deploy.
 - **Instructions rewrite** for the standing mandate: manage the paper portfolio via events —
   research, pick watches (price crossings both directions now meaningful, EDGAR filings as
   signals), size positions, realize P&L, always leave a subscription armed (the campaign must
@@ -171,8 +184,8 @@ gets an "assembled anyway — here's how" epilogue).
 
 Extend `docs/acceptance-tests.md` with AT-10 (delivery backbone semantics incl. crash-recovery
 tests), AT-11 (connector: gap-replay canonical case, zombie fencing, mid-session membership),
-AT-12 (mandate agent: sell bounds — cannot sell more than held, cannot short; guardrail caps
-enforced in code; campaign never ends with zero armed subscriptions), AT-13 (public site shows a
+AT-12 (mandate agent: sell bounds — cannot sell more than held, cannot short; daily token/turn
+budget enforced in code; campaign never ends with zero armed subscriptions), AT-13 (public site shows a
 live wake end-to-end + campaign view renders equity/positions truthfully), AT-14 (cloud E2E
 twice + one full unattended market day). Author these FIRST (tests-before-build applies to
 acceptance criteria too).
