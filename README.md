@@ -1,6 +1,7 @@
 # Event Catalog
 
-**Tool calls are how agents call the world; the Event Catalog is how the world calls back.**
+**Tool calls are how agents call the world; events are how the world calls back. The Event
+Catalog is where agents discover and subscribe to them.**
 
 AI agents are excellent at reacting *now* and terrible at reacting *later*. This POC gives an
 [eve](https://eve.dev) agent the missing primitive: **"wake me when X happens."** The agent
@@ -13,8 +14,8 @@ The demo sentence the whole system exists for:
 > *"Buy $100 of NVDA if it falls below $150 today."*
 
 The agent finds the right event source in the catalog, subscribes, parks, wakes on the price
-cross, re-checks reality, asks a human for approval, paper-trades, parks again, and reports the
-fill — without a single polling loop in agent code.
+cross, re-checks reality, paper-trades autonomously within the stated mandate, parks again, and
+reports the fill — without a single polling loop in agent code and without a human in the loop.
 
 **eve in three sentences** (enough to read the diagrams; the rest is at [eve.dev](https://eve.dev)):
 an eve *session* is a durable workflow — a conversation that can pause ("park") for hours at zero
@@ -65,7 +66,7 @@ flowchart TB
 
         subgraph agent["Trading agent — durable eve session"]
             LLM["model turn"]
-            TOOLS["tools: search_events · subscribe_event ·<br/>get_latest_price · get_account · submit_order (approval)"]
+            TOOLS["tools: search_events · subscribe_event ·<br/>get_latest_price · get_account · submit_order"]
         end
 
         subgraph catalog["Event Catalog (in-process library)"]
@@ -157,10 +158,7 @@ sequenceDiagram
     CH->>A: send() — wake message (envelope + onWake guidance)
     Note over A: same session resumes
     A->>X: get_latest_price + get_account (rehydrate, re-check predicate)
-    A-->>U: approval request: buy $100 NVDA?
-    U->>CH: "approve"
-    CH->>A: send("approve") — resolves approval
-    A->>X: submit_order (paper, notional $100)
+    A->>X: submit_order (paper, notional $100 — autonomous, within the mandate)
     A->>C: subscribe_event(order.filled, orderId)
     A-->>U: "Order placed, waiting for fill." — parks again
     X-->>P: trade_updates: filled
@@ -173,7 +171,7 @@ sequenceDiagram
 ("Notional" = a dollar-amount order, not a share count. "Arming" a subscription = the provider
 actually starts watching for it; disarming stops the watching.)
 
-Three details that look small and aren't:
+Two details that look small and aren't:
 
 - **Arm-on-turn-complete** (step 9): subscriptions stay `pending` while the agent's turn is still
   running and arm only after it ends — otherwise a fast tick could try to wake a session that
@@ -183,10 +181,8 @@ Three details that look small and aren't:
 - **Rehydrate + re-check** (step 15): "price crossed 150" is not "price is still 150" — a
   time-of-check-to-time-of-use (TOCTOU) gap. The wake's `onWake` guidance tells the agent its
   snapshot is stale by definition; it re-fetches reality before acting, and declines to trade if
-  the condition no longer holds.
-- **Approvals wait indefinitely** (step 18): an unanswered approval just stays parked — that's
-  eve's approval gate, not a timeout path. Reply `approve` or `deny` whenever; nothing is
-  submitted until you do.
+  the condition no longer holds — that judgment is the agent's own; there is no human in the
+  loop (a deliberate full-autonomy choice; see Honest boundaries).
 
 ## Subscription lifecycle
 
@@ -276,9 +272,9 @@ curl -s -X POST localhost:2000/catalog/chat -H 'content-type: application/json' 
 # watch the agent live
 curl -N localhost:2000/catalog/sessions/<sessionId>/stream
 
-# approvals are plain replies on the same conversation (same conversationId = same session)
+# follow-ups are plain replies on the same conversation (same conversationId = same session)
 curl -s -X POST localhost:2000/catalog/chat -H 'content-type: application/json' \
-  -d '{"conversationId":"demo-1","message":"approve"}'
+  -d '{"conversationId":"demo-1","message":"What are you waiting on right now?"}'
 
 # inspect every subscription's lifecycle
 curl -s localhost:2000/catalog/subscriptions | jq .
@@ -315,8 +311,12 @@ This is a local-first POC, and says so:
   catalog's **watchers** (websockets, poll loops, expiry timers) are in-process: a dev-server
   restart keeps subscriptions in Redis but drops the watching; re-subscribe. Arm failures are
   visible in `GET /catalog/subscriptions` (status `failed` + `lastError`), not pushed anywhere.
-- Trading is hard-coded to Alpaca's **paper** host. Notional, buy-side, market/day orders only,
-  every order behind a human approval gate. There is no code path to real money.
+- The agent trades **fully autonomously** — no human approval gate (a deliberate choice,
+  2026-07-12). Safety is capability-bounded instead: trading is hard-coded to Alpaca's **paper**
+  host; notional, buy-side, market/day orders only; the agent's instructions cap it at the
+  user's stated amount and require the post-wake re-check. There is no code path to real money.
+  (eve's approval gate is one line to restore — `approval: always()` on the tool — or a policy
+  function for bounded autonomy, e.g. auto-approve only within the mandate.)
 - Only conversations started on the catalog's own channel are wakeable (eve channels own their
   continuation tokens). Wiring another surface — Slack, a web UI — would need cross-channel
   wakes; out of scope here.

@@ -50,7 +50,7 @@ never during one.
 3. [ ] The **same session** resumes (session id in wake response/logs matches step 1 — no new session was created) and the agent produces a new turn that references the payload.
 4. [ ] **Wake-awareness**: the resumed turn shows the agent knows (a) it was woken by the Event Catalog, not addressed by the user — it does not answer the payload as if the human had typed it — and (b) that time has passed: the wake message carries `subscribedAt`/`firedAt`, and with a synthetic wake sent ≥2 minutes after step 1 the agent's reply reflects the elapsed time (e.g., "about 2 minutes after I started waiting…") rather than treating it as instantaneous. Test both: a wake seconds later and a wake minutes later.
 5. [ ] Sending a wake for an unknown conversation id fails visibly (error response + log line), and does NOT silently create a fresh session.
-6. [ ] Approval round-trip: trigger any approval-gated test tool through `demo-1`; the stream shows an approval request; deliver the approval decision back through the catalog channel; the tool executes and the agent reports its result.
+6. [ ] ~~Approval round-trip~~ — RETIRED 2026-07-12: approvals were removed for full autonomy (the mechanism was verified working in the original task-2 run; eve's gate is one line to restore).
 7. [ ] Every step above produced exactly one structured `[catalog]` log line per action (chat, wake, mismatch failure), each carrying the conversation id.
 
 ## AT-3 — Discover, subscribe, lifecycle, expiry
@@ -82,14 +82,14 @@ never during one.
 5. [ ] When NVDA crosses the threshold (usually within minutes for −0.1%): exactly **one** wake. Logs show `armed → delivering → fired`. The agent's resumed turn quotes the trigger price and `firedAt`.
 6. [ ] After firing, ticks keep flowing but the once-subscription never fires again (`SUBS`: `fired`, no repeat wakes).
 
-## AT-5 — Approved paper trade + fill wake (market hours)
+## AT-5 — Autonomous paper trade + fill wake (market hours)
 
-**Covers:** task 5 tools end-to-end (order path).
+**Covers:** task 5 tools end-to-end (order path). *(Rewritten 2026-07-12: human approval removed — full autonomy by explicit decision; safety is capability-bounded: paper host hard-coded, notional/buy-side/market/day only, agent instructions cap at the stated amount.)*
 
 1. [ ] `CHAT` (new conversation): *"Buy $100 of NVDA at market, right now."*
-2. [ ] The agent checks account first (`get_account` visible in stream), then calls `submit_order` — which **parks on approval**; nothing is submitted to Alpaca yet (verify: no new order in Alpaca dashboard).
-3. [ ] Decline path: answer the approval with a rejection → agent reports it did NOT trade; Alpaca dashboard shows no order. (Run this once — it's the safety-relevant path.)
-4. [ ] Repeat, approve this time → order submitted; agent reports order id; the `order.filled` subscription appears in `SUBS`; session parks.
+2. [ ] The agent checks account first (`get_account` visible in stream), then calls `submit_order` — **no approval pause, no `input.requested` event in the stream**; the order goes straight to Alpaca paper.
+3. [ ] Mandate cap: ask it to buy an amount exceeding buying power, or phrase a $100 mandate and watch it never exceed it — the agent declines/caps by its own judgment (instructions), not by a gate.
+4. [ ] Order submitted; agent reports order id; the `order.filled` subscription appears in `SUBS`; session parks.
 5. [ ] Within seconds (market order), the fill wake arrives; agent reports fill price and quantity. Alpaca paper dashboard shows the filled $100 notional NVDA order.
 
 ## AT-6 — Observability
@@ -106,8 +106,8 @@ never during one.
 
 1. [ ] One command visible to the audience: `CHAT` *"Buy $100 of NVDA if it falls below $\<slightly below current\> today."*
 2. [ ] Without further input: search → subscribe → agent says it's waiting → session parks (server could even be observed idle).
-3. [ ] Price crosses → wake → stream shows the agent **re-fetching the quote and re-checking the predicate** before acting (visible tool calls), then requesting approval.
-4. [ ] Human approves → paper trade submitted → agent parks again on `order.filled` → fill wake → final plain-language report (what it bought, at what price, vs. the trigger price).
+3. [ ] Price crosses → wake → stream shows the agent **re-fetching the quote and re-checking the predicate** before acting (visible tool calls).
+4. [ ] Paper trade submitted autonomously (no approval pause) → agent parks again on `order.filled` → fill wake → final plain-language report (what it bought, at what price, vs. the trigger price).
 5. [ ] `SUBS` shows both subscriptions' full lifecycle; LangSmith shows the whole run.
 6. [ ] **Run the entire flow a second time, fresh conversation. It must pass again with no manual fixes in between.**
 
