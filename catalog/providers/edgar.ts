@@ -14,14 +14,6 @@ function log(line: string) {
 // are for resolving/seeding state, not a substitute for watching.
 const POLL_INTERVAL_MS = 30_000;
 
-// Debug-only forced-fire trick (AT-8 step 3): when set, the very first watch
-// created for a CIK seeds its seen-set with every filing EXCEPT the single
-// most recent one, so the next poll (~30s later) treats that already-existing
-// filing as "new" and fires — useful on weekends when no real filing will
-// land. Read once at module load, like every other env var here (a process
-// restart is required to change it anyway — KNOWN_ISSUES.md #2).
-const SEED_SKIP_LATEST = process.env.EDGAR_SEED_SKIP_LATEST === "1";
-
 /** Zero-pads a CIK to the 10 digits data.sec.gov's submissions URL requires. Pure. */
 export function padCik(cik: number | string): string {
   return String(cik).padStart(10, "0");
@@ -32,6 +24,8 @@ export interface FilingRecord {
   filingDate: string;
   form: string;
   primaryDocument: string;
+  /** When SEC accepted the filing (ISO 8601) — the seed-window cutoff is measured against this, not filingDate. */
+  acceptanceDateTime: string;
 }
 
 interface RecentFilings {
@@ -39,6 +33,7 @@ interface RecentFilings {
   filingDate: string[];
   form: string[];
   primaryDocument: string[];
+  acceptanceDateTime: string[];
 }
 
 /** Zips the submissions API's structure-of-arrays into one record per filing, preserving order (newest first). Pure. */
@@ -48,6 +43,7 @@ export function parseFilings(recent: RecentFilings): FilingRecord[] {
     filingDate: recent.filingDate[i],
     form: recent.form[i],
     primaryDocument: recent.primaryDocument[i],
+    acceptanceDateTime: recent.acceptanceDateTime[i],
   }));
 }
 
@@ -63,13 +59,22 @@ export function diffNewFilings(seen: ReadonlySet<string>, filings: FilingRecord[
 }
 
 /**
- * Builds the seen-set a freshly-created watch starts from. `filings` is
- * newest-first (the submissions API's own order — verified live). With
- * `skipLatest`, the single most recent filing is left out on purpose: see
- * SEED_SKIP_LATEST above. Pure.
+ * Builds the seen-set a freshly-created watch starts from: every filing SEC
+ * accepted at-or-before `armedAt`. This is a seed WINDOW, not "everything
+ * that currently exists" — a filing accepted between the subscription's
+ * armedAt and the watch's first poll must NOT be swallowed into the
+ * baseline, or it silently never fires (it was genuinely new information the
+ * subscriber arrived in time to see). `filings` is newest-first (the
+ * submissions API's own order — verified live), which `skipLatest` relies
+ * on: with it set, the single most recent *eligible* (<=armedAt) filing is
+ * left out on purpose — the documented forced-fire trick
+ * (createSkipLatestSeedConsumer below decides whether skipLatest is ever
+ * true, and only once per process). Pure.
  */
-export function seedAccessionSet(filings: FilingRecord[], skipLatest: boolean): Set<string> {
-  const toSeed = skipLatest ? filings.slice(1) : filings;
+export function seedAccessionSet(filings: FilingRecord[], armedAt: string, skipLatest: boolean): Set<string> {
+  const armedAtMs = new Date(armedAt).getTime();
+  const eligible = filings.filter((filing) => new Date(filing.acceptanceDateTime).getTime() <= armedAtMs);
+  const toSeed = skipLatest ? eligible.slice(1) : eligible;
   return new Set(toSeed.map((filing) => filing.accessionNumber));
 }
 
@@ -79,6 +84,29 @@ export function filingUrl(cik: string, accessionNumber: string, primaryDocument:
   const accessionNoDashes = accessionNumber.replace(/-/g, "");
   return `https://www.sec.gov/Archives/edgar/data/${cikNoLeadingZeros}/${accessionNoDashes}/${primaryDocument}`;
 }
+
+/**
+ * Debug-only forced-fire trick (AT-8 step 3), read from EDGAR_SEED_SKIP_LATEST:
+ * yields the flag's real value exactly once, then always false — so a watch
+ * torn down and recreated later in the same long-running process (e.g. a
+ * demo operator disarms and re-subscribes) can't keep manufacturing repeat
+ * forced wakes from one env var. Pure (given `initial`); the module-level
+ * instance below is the only stateful use.
+ */
+export function createSkipLatestSeedConsumer(initial: boolean): () => boolean {
+  let remaining = initial;
+  return () => {
+    const value = remaining;
+    remaining = false;
+    return value;
+  };
+}
+
+// Read once at module load, like every other env var here (a process
+// restart is required to change it anyway — KNOWN_ISSUES.md #2); consumed
+// (see above) so only the very first watch created in this process can ever
+// use it.
+const consumeSkipLatestSeed = createSkipLatestSeedConsumer(process.env.EDGAR_SEED_SKIP_LATEST === "1");
 
 /** Required by SEC on every request (data.sec.gov and www.sec.gov both 403 without a descriptive User-Agent) — verified live. */
 function edgarHeaders(): HeadersInit {
@@ -122,7 +150,10 @@ async function resolveCik(ticker: string): Promise<string> {
   return cik;
 }
 
-async function fetchFilings(cik: string): Promise<{ company: string; filings: FilingRecord[] }> {
+/** The shape createEdgarWatcher needs from a filings source — the real implementation hits data.sec.gov; tests inject a fake. */
+export type FetchFilings = (cik: string) => Promise<{ company: string; filings: FilingRecord[] }>;
+
+async function fetchFilingsFromSec(cik: string): Promise<{ company: string; filings: FilingRecord[] }> {
   const res = await fetch(`https://data.sec.gov/submissions/CIK${cik}.json`, { headers: edgarHeaders() });
   if (!res.ok) throw new Error(`EDGAR submissions fetch failed for CIK${cik}: ${res.status} ${await res.text()}`);
   const data = (await res.json()) as { name: string; filings: { recent: RecentFilings } };
@@ -138,121 +169,176 @@ interface CikWatch {
   timer: ReturnType<typeof setInterval>;
 }
 
-// One poll loop per watched CIK, regardless of how many subscriptions watch
-// it (AGENTS.md rule 3) — keyed by CIK, not by subscription id.
-const watches = new Map<string, CikWatch>();
-// Guards watch creation against two arm() calls for the same CIK racing each
-// other (two different conversations subscribing to the same company can
-// both complete their turns around the same time). Caching the in-flight
-// creation *promise* — set synchronously before any `await`, same pattern as
-// wake.ts's armClaimed — means the second caller reuses the first's result
-// instead of starting a second poll loop. See createWatch's rejection
-// cleanup below for the failure path.
-const watchCreation = new Map<string, Promise<CikWatch>>();
-// subscriptionId -> cik, so disarm() (which only receives the Subscription,
-// not the watch it lives under) can find the right watch without
-// re-resolving the ticker.
-const subCik = new Map<string, string>();
-
-async function createWatch(cik: string, ticker: string): Promise<CikWatch> {
-  const { company, filings } = await fetchFilings(cik);
-  const seen = seedAccessionSet(filings, SEED_SKIP_LATEST);
-  const watch: CikWatch = {
-    cik,
-    ticker,
-    company,
-    seen,
-    subscriptions: new Map(),
-    timer: setInterval(() => void poll(watch), POLL_INTERVAL_MS),
-  };
-  watches.set(cik, watch);
-  log(
-    `watch-start cik=${cik} ticker=${ticker} company="${company}" seeded=${seen.size}` +
-      (SEED_SKIP_LATEST ? " skip-latest=1 (debug forced-fire seeding)" : ""),
-  );
-  return watch;
+export interface CikWatchInfo {
+  cik: string;
+  ticker: string;
+  subscriberCount: number;
+  seenCount: number;
 }
 
-function getOrCreateWatch(cik: string, ticker: string): Promise<CikWatch> {
-  let promise = watchCreation.get(cik);
-  if (!promise) {
-    promise = createWatch(cik, ticker);
-    watchCreation.set(cik, promise);
-    // A failed first poll must not permanently poison this CIK — drop the
-    // cached rejection so the next arm() attempt gets a clean retry instead
-    // of reusing a promise that can only ever reject again.
-    promise.catch(() => watchCreation.delete(cik));
-  }
-  return promise;
+export interface EdgarWatcher {
+  arm(sub: Subscription, cik: string, ticker: string): Promise<void>;
+  disarm(sub: Subscription): void;
+  /** Test/introspection only — undefined means no live watch for this CIK (never created, or already torn down). */
+  getWatch(cik: string): CikWatchInfo | undefined;
 }
 
-async function poll(watch: CikWatch): Promise<void> {
-  let company: string;
-  let filings: FilingRecord[];
-  try {
-    ({ company, filings } = await fetchFilings(watch.cik));
-  } catch (err) {
-    // A transient SEC 5xx/network hiccup must not kill the loop — log loudly
-    // and let the next tick try again (AGENTS.md rule 3's "poll loop errors
-    // log loudly and keep the loop alive").
-    const message = err instanceof Error ? err.message : String(err);
-    log(`poll-error cik=${watch.cik} ticker=${watch.ticker} error=${message}`);
-    return;
+/**
+ * Builds the coalesced arm/disarm/poll orchestration: one poll loop per CIK,
+ * shared by every subscription watching it (AGENTS.md rule 3), regardless of
+ * how many subscribe or in what order. Parameterized by `fetchFilings` (real
+ * network in production, an injectable fake in tests) and `getSkipLatestSeed`
+ * (the debug forced-fire trick) so the whole orchestration — including the
+ * arm/disarm race below — is unit-testable without hitting SEC or real
+ * timers.
+ */
+export function createEdgarWatcher(
+  fetchFilings: FetchFilings,
+  pollIntervalMs: number,
+  getSkipLatestSeed: () => boolean,
+): EdgarWatcher {
+  // One poll loop per watched CIK, regardless of how many subscriptions watch
+  // it — keyed by CIK, not by subscription id.
+  const watches = new Map<string, CikWatch>();
+  // Guards watch creation against two arm() calls for the same CIK racing
+  // each other (two different conversations subscribing to the same company
+  // can both complete their turns around the same time). Caching the
+  // in-flight creation *promise* — set synchronously before any `await`,
+  // same pattern as wake.ts's armClaimed — means the second caller reuses
+  // the first's result instead of starting a second poll loop.
+  const watchCreation = new Map<string, Promise<CikWatch>>();
+  // subscriptionId -> cik, so disarm() (which only receives the Subscription,
+  // not the watch it lives under) can find the right watch without
+  // re-resolving the ticker.
+  const subCik = new Map<string, string>();
+
+  async function createWatch(cik: string, ticker: string, armedAt: string): Promise<CikWatch> {
+    const { company, filings } = await fetchFilings(cik);
+    const seen = seedAccessionSet(filings, armedAt, getSkipLatestSeed());
+    const watch: CikWatch = {
+      cik,
+      ticker,
+      company,
+      seen,
+      subscriptions: new Map(),
+      timer: setInterval(() => void poll(watch), pollIntervalMs),
+    };
+    watches.set(cik, watch);
+    log(`watch-start cik=${cik} ticker=${ticker} company="${company}" seeded=${seen.size}`);
+    return watch;
   }
-  watch.company = company;
 
-  const fresh = diffNewFilings(watch.seen, filings);
-  for (const filing of fresh) watch.seen.add(filing.accessionNumber);
+  async function getOrCreateWatch(cik: string, ticker: string, armedAt: string): Promise<CikWatch> {
+    let promise = watchCreation.get(cik);
+    if (!promise) {
+      promise = createWatch(cik, ticker, armedAt);
+      watchCreation.set(cik, promise);
+      // A failed first poll must not permanently poison this CIK — drop the
+      // cached rejection so the next arm() attempt gets a clean retry instead
+      // of reusing a promise that can only ever reject again.
+      promise.catch(() => watchCreation.delete(cik));
+    }
+    const watch = await promise;
+    // Re-check after the await: even an already-resolved `promise` still
+    // yields to the microtask queue here, and a concurrent disarm() (fully
+    // synchronous — no await in it) can run in that gap and tear this exact
+    // watch down (last subscriber left: timer cleared, both maps deleted)
+    // before we resume. Landing a new subscriber on that dead watch would
+    // orphan it — a live subscription pointing at a stopped poll loop.
+    // Retrying re-claims (building a fresh watch, or joining a fresh
+    // concurrent claim) instead.
+    if (watches.get(cik) !== watch) return getOrCreateWatch(cik, ticker, armedAt);
+    return watch;
+  }
 
-  log(`poll cik=${watch.cik} ticker=${watch.ticker} subscribers=${watch.subscriptions.size} new=${fresh.length}`);
+  async function poll(watch: CikWatch): Promise<void> {
+    let company: string;
+    let filings: FilingRecord[];
+    try {
+      ({ company, filings } = await fetchFilings(watch.cik));
+    } catch (err) {
+      // A transient SEC 5xx/network hiccup must not kill the loop — log
+      // loudly and let the next tick try again (AGENTS.md rule 3's "poll
+      // loop errors log loudly and keep the loop alive").
+      const message = err instanceof Error ? err.message : String(err);
+      log(`poll-error cik=${watch.cik} ticker=${watch.ticker} error=${message}`);
+      return;
+    }
+    watch.company = company;
 
-  for (const filing of fresh) {
-    for (const sub of watch.subscriptions.values()) {
-      const { formTypes } = sub.params as { formTypes?: string[] };
-      if (!matchesFormFilter(filing.form, formTypes)) continue;
-      void deliverWake(sub, {
-        reason: "fired",
-        snapshot: {
-          company: watch.company,
-          cik: watch.cik,
-          form: filing.form,
-          accessionNumber: filing.accessionNumber,
-          filingDate: filing.filingDate,
-          primaryDocument: filing.primaryDocument,
-          url: filingUrl(watch.cik, filing.accessionNumber, filing.primaryDocument),
-        },
-      });
+    const fresh = diffNewFilings(watch.seen, filings);
+    for (const filing of fresh) watch.seen.add(filing.accessionNumber);
+
+    log(`poll cik=${watch.cik} ticker=${watch.ticker} subscribers=${watch.subscriptions.size} new=${fresh.length}`);
+
+    for (const filing of fresh) {
+      for (const sub of watch.subscriptions.values()) {
+        const { formTypes } = sub.params as { formTypes?: string[] };
+        if (!matchesFormFilter(filing.form, formTypes)) continue;
+        void deliverWake(sub, {
+          reason: "fired",
+          snapshot: {
+            company: watch.company,
+            cik: watch.cik,
+            form: filing.form,
+            accessionNumber: filing.accessionNumber,
+            filingDate: filing.filingDate,
+            primaryDocument: filing.primaryDocument,
+            url: filingUrl(watch.cik, filing.accessionNumber, filing.primaryDocument),
+          },
+        });
+      }
     }
   }
+
+  async function arm(sub: Subscription, cik: string, ticker: string): Promise<void> {
+    // Any failure inside getOrCreateWatch must not leave a dangling subCik
+    // entry behind for a sub about to be marked "failed" — arm failures
+    // don't get a disarm() call for free (same convention as alpaca.ts).
+    // Both writes below only happen once getOrCreateWatch has genuinely
+    // succeeded.
+    const watch = await getOrCreateWatch(cik, ticker, sub.armedAt ?? new Date().toISOString());
+    watch.subscriptions.set(sub.id, sub);
+    subCik.set(sub.id, cik);
+    logCatalog("arm", sub, { cik, ticker, subscribers: watch.subscriptions.size });
+  }
+
+  function disarm(sub: Subscription): void {
+    const cik = subCik.get(sub.id);
+    subCik.delete(sub.id);
+    if (!cik) return;
+
+    const watch = watches.get(cik);
+    if (!watch) return;
+    watch.subscriptions.delete(sub.id);
+
+    if (watch.subscriptions.size === 0) {
+      clearInterval(watch.timer);
+      watches.delete(cik);
+      watchCreation.delete(cik);
+      log(`watch-stop cik=${cik} ticker=${watch.ticker}`);
+    }
+  }
+
+  function getWatch(cik: string): CikWatchInfo | undefined {
+    const watch = watches.get(cik);
+    if (!watch) return undefined;
+    return { cik: watch.cik, ticker: watch.ticker, subscriberCount: watch.subscriptions.size, seenCount: watch.seen.size };
+  }
+
+  return { arm, disarm, getWatch };
 }
+
+const edgarWatcher = createEdgarWatcher(fetchFilingsFromSec, POLL_INTERVAL_MS, consumeSkipLatestSeed);
 
 async function armFilingNew(sub: Subscription): Promise<void> {
   const ticker = sub.resource.toUpperCase();
   const cik = await resolveCik(ticker);
-  // Any failure past this point must not leave a dangling subCik entry
-  // behind for a sub about to be marked "failed" — arm failures don't get a
-  // disarm() call for free (same convention as alpaca.ts).
-  const watch = await getOrCreateWatch(cik, ticker);
-  watch.subscriptions.set(sub.id, sub);
-  subCik.set(sub.id, cik);
-  logCatalog("arm", sub, { cik, ticker, subscribers: watch.subscriptions.size });
+  await edgarWatcher.arm(sub, cik, ticker);
 }
 
 function disarmFilingNew(sub: Subscription): void {
-  const cik = subCik.get(sub.id);
-  subCik.delete(sub.id);
-  if (!cik) return;
-
-  const watch = watches.get(cik);
-  if (!watch) return;
-  watch.subscriptions.delete(sub.id);
-
-  if (watch.subscriptions.size === 0) {
-    clearInterval(watch.timer);
-    watches.delete(cik);
-    watchCreation.delete(cik);
-    log(`watch-stop cik=${cik} ticker=${watch.ticker}`);
-  }
+  edgarWatcher.disarm(sub);
 }
 
 async function arm(sub: Subscription): Promise<void> {

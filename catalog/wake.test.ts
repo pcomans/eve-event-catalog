@@ -149,6 +149,60 @@ test("deliverWake sends the exact same firedAt it stores on the subscription", a
   assert.equal(body.firedAt, stored?.firedAt);
 });
 
+function stubFetchFail(status = 500) {
+  // Mirror of stubFetchOk, but the /catalog/wake POST itself fails — used to
+  // exercise deliverWake's catch path (status -> "failed") without touching
+  // Redis's own fetch traffic.
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    if (!href.includes("/catalog/wake")) return original(url as never, init);
+    return new Response("boom", { status });
+  }) as typeof fetch;
+  return {
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
+}
+
+test("deliverWake disarms the provider even when the wake POST itself fails — covers both alpaca and edgar, which share this one code path", async (t) => {
+  const conversationId = `test:${randomUUID()}`;
+  const sub = await createSubscription({
+    conversationId,
+    provider: `test-failed-disarm-provider-${randomUUID()}`,
+    event: "fire",
+    resource: "NVDA",
+    params: {},
+    expiresAt: null,
+  });
+  t.after(() => deleteSubscription(sub.id));
+
+  let disarmCalls = 0;
+  registerProvider(sub.provider, {
+    supportedEvents: ["fire"],
+    arm: async () => {},
+    disarm: async () => {
+      disarmCalls++;
+    },
+  });
+
+  const armed = { ...sub, status: "armed" as const, armedAt: new Date().toISOString() };
+  const fetchStub = stubFetchFail();
+  t.after(fetchStub.restore);
+
+  await deliverWake(armed, { reason: "fired" });
+
+  assert.equal(
+    disarmCalls,
+    1,
+    "a failed wake delivery must still disarm the provider — otherwise the subscription is stuck in the " +
+      "provider's maps forever, blocking zero-subscriber teardown (edgar) or leaving a dead stream watcher (alpaca)",
+  );
+  const stored = await getSubscription(sub.id);
+  assert.equal(stored?.status, "failed");
+});
+
 test("deliverWake disarms the provider on both fired and expired terminal transitions", async (t) => {
   const conversationId = `test:${randomUUID()}`;
   const sub = await createSubscription({

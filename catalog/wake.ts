@@ -130,6 +130,14 @@ export async function deliverWake(sub: Subscription, options: DeliverOptions): P
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const updated = await updateSubscription(sub.id, { status: "failed", lastError: message });
+    // Without this, a failed delivery leaves the subscription live in the
+    // provider's own bookkeeping forever — it never got the disarm() call
+    // above, since that's on the success path only. For a poll-coalescing
+    // provider (edgar) that means the CIK's watch never sees its subscriber
+    // count drop to zero and keeps polling; for a push provider (alpaca) it
+    // means a dead stream subscription lingers. disarmSafely already
+    // swallows/logs its own errors, matching the success-path call above.
+    await disarmSafely(updated);
     logCatalog("deliver-failed", updated, { error: message });
   }
 }
