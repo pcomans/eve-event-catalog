@@ -122,8 +122,8 @@ Key moves, bottom to top:
   arms (see below), never for watching.
 - **The wake is the primitive.** Waking an agent is one `send()` on the conversation's
   continuation token — same session, full memory, plus an envelope that makes time-passage
-  explicit. Delivery loops back over HTTP into the channel (rather than an in-process call)
-  because the channel is the only component that owns continuation tokens — and it makes every
+  explicit. Delivery loops back over HTTP into the conversation API (rather than an in-process
+  call) because that component alone holds the resume keys — and it makes every
   wake visible in the logs. The wake route is unauthenticated (local-only POC), which is exactly
   why it *rejects* any caller-supplied guidance: the model-trusted instructions can only come
   from `catalog.json`, resolved server-side. Event payloads are data, never instructions.
@@ -332,5 +332,5 @@ This is a local-first POC, and says so:
 | `docs/acceptance-tests.md` | manual test scripts per milestone (AT-1 … AT-9) |
 | `AGENTS.md` | project rules (north star, Vercel-primitives-only, catalog honesty, TDD) |
 | `KNOWN_ISSUES.md` | every sharp edge found building on eve 0.22.5 beta — read before touching channel code |
-| `agent/` | the eve agent: a 19-line prompt, 5 tools, catalog channel, OTel |
+| `agent/` | the eve agent: a 19-line prompt, 5 tools, the conversation/wake API, OTel |
 | `catalog/` | the Event Catalog: `catalog.json`, registry, wake, providers |
