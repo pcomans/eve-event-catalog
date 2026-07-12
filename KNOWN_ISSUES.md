@@ -79,7 +79,26 @@ buffers the reentrant `send()` rather than falling back to a new session. No ext
 machinery was added; the existing session-id-mismatch check in the wake route stays as an automatic
 backstop in case this behaves differently against a different workflow backend (e.g. in production).
 
-## 8. Assorted
+## 8. corepack silently upgraded pnpm mid-session; pnpm 11 rejects fresh packages
+
+Observed 2026-07-12: corepack drifted pnpm from 10.32.1 to 11.12.0 without any action on our
+part. pnpm 11 enforces a default `minimumReleaseAge` supply-chain policy that rejects packages
+published within the last day — which breaks installs here because eve's beta dependency tree
+routinely contains day-old transitive packages (crossws/nf3/srvx at the time). A failed install
+can leave the shared `node_modules` broken mid-operation (we lost `node_modules/.bin/eve` and
+both running dev servers this way).
+
+- `package.json`'s `packageManager` field pins the exact pnpm version — corepack then stops
+  drifting. Pinned to the session's known-good 10.32.1; revisit after the POC (pnpm 11's policy
+  is a *good* security feature — the right long-term move is adopting it deliberately, not
+  bypassing it).
+- If an install still fails with a `minimumReleaseAge` error, run
+  `corepack pnpm@10.32.1 <cmd>`. Do NOT reach for `--no-verify-store-integrity` — that disables
+  a real security check.
+- Never run pnpm with `CI=true` to skip its confirmation prompts — the prompt you're bypassing
+  may be "recreate node_modules?", which is destructive to every process using it.
+
+## 9. Assorted
 
 - The dev server listens on port **2000**, not 3000 as eve's own docs curl examples suggest.
 - Local durable workflow state lives in `.workflow-data/` (gitignored). If sessions look stuck
