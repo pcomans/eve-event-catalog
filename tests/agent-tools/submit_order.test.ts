@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import submitOrder from "./submit_order.ts";
+import submitOrder from "../../agent/tools/submit_order.ts";
+
+// Lives outside agent/tools/ on purpose: eve's discovery scans every .ts
+// file directly under agent/tools/ as a tool definition and the model-facing
+// name must be a bare identifier, so a *.test.ts file there fails discovery
+// and blocks `pnpm dev`/`pnpm build` outright (no "not a tool" exception).
+// catalog/*.test.ts can colocate because catalog/ isn't a discovery-scanned
+// directory; agent/tools/ tests need a separate home instead.
 
 // eve's public ToolDefinition types inputSchema as StandardJSONSchemaV1 |
 // JsonObject (the interop surface it accepts — Zod, Standard Schema, or a
@@ -15,10 +22,6 @@ const inputSchema = submitOrder.inputSchema as unknown as {
 
 // Zod schema behavior only — no live Alpaca call, no approval flow. Verifies
 // the input contract a tool call must satisfy before execute() ever runs.
-// Not yet wired into package.json's "test" script glob (catalog/*.test.ts,
-// catalog/providers/*.test.ts) — run directly with
-// `node --test agent/tools/submit_order.test.ts` until that's extended to
-// cover agent/tools/*.test.ts too.
 test("submit_order rejects a notional below Alpaca's $1 minimum", () => {
   const result = inputSchema.safeParse({ symbol: "NVDA", notionalUsd: 0.5 });
   assert.equal(result.success, false);
