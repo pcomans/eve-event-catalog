@@ -328,7 +328,7 @@ This is a local-first POC, and says so:
 
 | path | what |
 |---|---|
-| `docs/prd-draft.md` | the PRD this implements |
+| `docs/prd-draft.md` | the original PRD (historical — kept as written; where the implementation deliberately deviates, e.g. full autonomy instead of trade approvals, this README's Honest boundaries section is the record) |
 | `docs/acceptance-tests.md` | manual test scripts per milestone (AT-1 … AT-9) |
 | `AGENTS.md` | project rules (north star, Vercel-primitives-only, catalog honesty, TDD) |
 | `KNOWN_ISSUES.md` | every sharp edge found building on eve 0.22.5 beta — read before touching channel code |
