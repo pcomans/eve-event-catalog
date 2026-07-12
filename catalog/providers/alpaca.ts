@@ -47,10 +47,10 @@ function ensureStockStream(): StockDataStream {
 
   // The test feed has no first-class `feed` value — it's reached by
   // overriding the stream's URL entirely (the SDK's documented mechanism for
-  // routing through a different endpoint), so `feed` here is a harmless
-  // placeholder once `url` is set.
+  // routing through a different endpoint); `feed` is omitted in that case
+  // since `url` takes precedence over it.
   const stream = alpacaClient.marketData.stockStream(
-    FEED === "test" ? { feed: "iex", url: TEST_STREAM_URL } : { feed: FEED },
+    FEED === "test" ? { url: TEST_STREAM_URL } : { feed: FEED },
   );
   stream.onStateChange((state) => {
     if (state === STATE.CONNECTED) log(`connect feed=${FEED}`);

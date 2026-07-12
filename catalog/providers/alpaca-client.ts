@@ -152,9 +152,7 @@ export async function getLatestTrade(symbol: string, feed: DataFeed): Promise<La
     return lastTestFeedTrade;
   }
 
-  const resp = await alpacaClient.marketData.stocks.stockLatestTrades({ symbols: symbol, feed });
-  const raw = resp.trades?.[symbol];
-  if (!raw) throw new Error(`no latest trade for ${symbol} (feed=${feed})`);
-  const trade = toStockTrade(raw, symbol);
+  const resp = await alpacaClient.marketData.stocks.stockLatestTradeSingle({ symbol, feed });
+  const trade = toStockTrade(resp.trade, symbol);
   return { price: trade.price, timestamp: trade.timestamp.toISOString() };
 }
