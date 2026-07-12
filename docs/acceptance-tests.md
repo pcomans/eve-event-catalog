@@ -126,3 +126,144 @@ never during one.
 
 1. [ ] A tester who has NOT read this file or the plan can go from `git clone` to passing AT-7 using only `README.md` (env setup, market-hours caveat, threshold guidance, curl commands).
 2. [ ] README states the runtime boundary plainly: eve sessions are durable; catalog watchers are in-process and local-only; restart = re-subscribe.
+
+---
+
+# Production phase (plan: `docs/plan-vercel-production.md`)
+
+AT-10…AT-14 are the acceptance criteria for the everything-on-Vercel build, **authored before the
+build** (tests-before-build applies to acceptance criteria). Additional prerequisites: Vercel Pro
+project, `CATALOG_API_SECRET` (new), `TAVILY_API_KEY` (new), `AI_GATEWAY_API_KEY` (local dev
+only — prod uses AI Gateway OIDC). Where a step says "test suite covers it", the referenced
+red-green node:test tests must exist and be green in `pnpm test` — the checkbox is the manual
+spot-check on top.
+
+Auth convention from AT-10 on: `CHAT()` and wake POSTs carry
+`-H "authorization: Bearer $CATALOG_API_SECRET"`. Read-only GETs never need it.
+
+## AT-10 — Delivery backbone (Phase 1)
+
+**Covers:** cloud-safe delivery semantics (correctness prereq 4), event history, route auth —
+all verified locally before anything moves to Vercel.
+
+1. [ ] **Event history stream**: run AT-3 (subscribe → expiry). `curl -s localhost:2000/catalog/events | jq .`
+       returns an append-only history in which that subscription's `armed → delivering →
+       expired`/wake transitions all appear, each with timestamps, `subscriptionId`, and
+       `conversationId`. Nothing in the response requires auth; nothing in it contains secrets.
+2. [ ] **Claims are leases, not memory**: test suite covers crash-between-claim-and-publish —
+       a subscription stuck in `delivering` whose lease has expired is picked up by the recovery
+       sweep and the wake still arrives, exactly once. Manual spot-check: kill the dev server
+       mid-delivery (or use the test's documented simulation), restart, watch the sweep log line
+       recover it.
+3. [ ] **Idempotent delivery**: test suite covers duplicate publish — two deliveries for the
+       same `subscriptionId` produce exactly one wake (dedupe on the one-shot subscription id).
+4. [ ] **Write routes are closed**: `POST /catalog/chat` and `POST /catalog/wake` without the
+       bearer secret → 401 (structured error + log line, no session touched). With the secret →
+       behave exactly as before. `GET /catalog/subscriptions` and `GET /catalog/events` work with
+       no auth.
+5. [ ] **Queues-from-Nitro smoke test**: `@vercel/queue` `send()` from a Nitro route and a
+       `handleCallback()` consumer round-trip a message locally (`vercel dev` or the documented
+       harness). Result (works / caveats) recorded in `docs/architecture.md` — this de-risks the
+       delivery topology before Phase 2 builds on it.
+6. [ ] **No regressions**: full `pnpm test` green; AT-2 and AT-3 pass unchanged except for the
+       auth header.
+
+## AT-11 — Connector runtime (Phase 2)
+
+**Covers:** correctness prereqs 1–3 on the extracted watcher tier (Vercel Service, chained
+socket sessions). Runnable locally (same runtime in-process) except where marked.
+
+1. [ ] **Gap replay, canonical case** (test suite): threshold 150 `crossesBelow`, prev 151;
+       the connection gap contains trades 149 → 151 (crossed and recovered before reconnect).
+       On reconnect, historical trades are fetched from the persisted per-symbol cursor, merged
+       with buffered live trades in source order, deduped by `i`+`x`+`t`, and replayed through
+       the predicate — the wake fires, exactly once. The mirror case (no cross inside the gap)
+       fires zero times.
+2. [ ] **Cursor persistence**: after any processed trade, the per-symbol cursor (trade id +
+       timestamp) is visible in Redis; a restarted session resumes from it (log line shows the
+       replay window), never from "now".
+3. [ ] **Fenced leases / zombie test** (test suite): a watcher holding an expired lease (stale
+       fencing token) attempts a delivery/state write → rejected and logged; the current
+       leaseholder is unaffected. Exactly one watcher per stream holds the lease at any time.
+4. [ ] **Dynamic membership**: with a socket session already running, arm a subscription for a
+       new symbol → it is being watched within the membership cadence (~15s; log shows the
+       stream subscribe). Cancel/expire the last subscription on a symbol → the symbol is
+       dropped from the stream within the same cadence.
+5. [ ] **Order reconciliation across a gap**: an order that fills while the trade_updates
+       session is down is reconciled on reconnect via REST closed-orders bracketing
+       (`after`/`until`) and produces its fill wake, exactly once (test suite; manual variant
+       needs market hours).
+6. [ ] **One code path, two hosts**: `pnpm dev` still runs the full watcher tier in-process;
+       AT-4 step 1a (FAKEPACA pipeline) passes unchanged. No eve imports anywhere in the
+       watcher path (verified by a grep the test suite encodes).
+
+## AT-12 — Mandate agent (Phase 4)
+
+**Covers:** sell capability bounds, minimal guardrails, the standing-mandate rewrite.
+
+1. [ ] **Sell is position-bounded** (test suite, red-green): selling more than the held quantity
+       is rejected at the tool layer with an error naming the bound; selling a symbol with no
+       position (shorting) is rejected; a valid sell of ≤ held quantity goes through. The paper
+       host remains hard-coded — no real-money endpoint appears anywhere (grep).
+2. [ ] **Runaway cap** (test suite): the per-day turn ceiling is enforced in code and
+       env-configurable; the turn over the ceiling is refused with a visible log line, and the
+       cap resets the next day. No other structural limits exist (no notional / trades-per-day /
+       max-subscription blockers — deliberate; see plan).
+3. [ ] **Model pin**: the configured model id is `deepseek/deepseek-v4-pro` via AI Gateway;
+       `deepseek-chat` / `deepseek-reasoner` appear nowhere in code or env (they deprecate
+       2026-07-24 and would break the campaign mid-run).
+4. [ ] **Research tool**: ask the agent (private chat) to evaluate a trade idea — the stream
+       shows a Tavily search call before any order; the tool returns real results.
+5. [ ] **The campaign never dead-ends**: after any completed campaign turn, at least one
+       subscription is armed. Test both paths: (a) agent behavior — a turn in which everything
+       fired/expired ends with the agent arming something new; (b) the market-open schedule
+       wakes the campaign conversation, so even a fully idle overnight state gets a turn every
+       trading day. `SUBS` after each check shows ≥1 `armed`.
+6. [ ] **Mandate holds without a human**: a full simulated cycle — open-schedule wake → research
+       → subscribe → park → (synthetic or real) event wake → trade decision → fill wake — runs
+       with zero human input, and every decision is visible in the stream/LangSmith.
+
+## AT-13 — Public observatory (Phase 5)
+
+**Covers:** the public read-only site. The audience is a Vercel engineer; presentation counts.
+
+1. [ ] **Read-only by construction**: the site renders no composer and exposes no mutation
+       route; browsing every page fires no authenticated/write request (check the network tab);
+       no secret appears in HTML, JS bundles, or API responses.
+2. [ ] **Campaign view is truthful**: equity curve, positions, and realized P&L match the
+       Alpaca paper account (spot-check numbers against the Alpaca dashboard at the same
+       moment).
+3. [ ] **Subscriptions table is live**: it matches `GET /catalog/subscriptions` (statuses,
+       predicates, timestamps), and a lifecycle transition (e.g. an expiry) appears without a
+       redeploy.
+4. [ ] **Event feed**: wakes/arms/fires/expiries/failures from the event-history stream render
+       with timestamps and elapsed times (subscribed → fired), newest first.
+5. [ ] **Transcripts — "see it think"**: a conversation view renders the full transcript
+       (agent reasoning, tool calls, wake envelopes) via eve's `defaultMessageReducer` over the
+       session stream replay, threaded into the campaign timeline.
+6. [ ] **A live wake end-to-end on the site**: subscribe (private chat) → event fires → the wake,
+       the resumed turn, and any resulting order all become visible on the public site with no
+       manual intervention.
+
+## AT-14 — Cloud E2E + campaign launch (Phase 6)
+
+**Covers:** production deploy, the world-vercel re-verification, and the launch bar. All steps
+run against the deployed Vercel project, not localhost.
+
+1. [ ] **KNOWN_ISSUES #7 on world-vercel (hard gate)**: on a real preview deploy, a wake that
+       races turn-end (sent while the arming turn is still streaming) is buffered and delivered
+       after park — not lost, not duplicated. Run the race repeatedly (≥5×). Arming is not
+       trusted in prod until this passes.
+2. [ ] **Deployment plumbing**: deployed via `vercel deploy` (not `--prebuilt`); all three
+       services up; secrets are real Vercel env vars; wake loopback works (with
+       `VERCEL_AUTOMATION_BYPASS_SECRET` if Deployment Protection is on); private bindings — the
+       connector reaches eve's wake route without a public hop.
+3. [ ] **Cloud E2E during market hours**: subscribe → park → real price cross → wake →
+       autonomous trade → fill wake — with every stage visible on the public observatory.
+       **Twice, fresh conversations, no manual fixes between runs.**
+4. [ ] **One full unattended market day**: the standing campaign runs open→close with zero human
+       intervention; the turn cap is never hit by accident (or if hit, correctly — logged);
+       the feed and transcripts populate; the day ends with ≥1 armed subscription.
+5. [ ] **Docs close the loop**: README + `docs/architecture.md` updated — the "watcher tier is
+       local-only" boundary is gone, replaced by the deployed topology; only then does the link
+       go out.
