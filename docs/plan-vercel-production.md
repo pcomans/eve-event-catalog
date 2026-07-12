@@ -183,7 +183,10 @@ runs the same runtime in-process — one code path, two hosts).
 
 **Phase 3 — EDGAR + expiry migration.** Workflow sleep(30s) sweep for EDGAR (coalescing across
 CIKs preserved; seen-sets already Redis-shaped — move them from memory); expiry via durable
-sleep or sorted-set sweep. catalog.json freshness stays honest either way.
+sleep or sorted-set sweep. catalog.json freshness stays honest either way. The Phase 1
+delivery-recovery sweep migrates here too: its local setInterval driver is a stand-in (a frozen
+Fluid instance never ticks) — move it onto the same durable primitive as expiry (flagged by the
+Phase 1 Codex gate).
 
 **Phase 4 — the mandate agent (the showcase's engine).**
 - **Model: DeepSeek V4-Pro via Vercel AI Gateway** (Philipp's pick 2026-07-12: "latest DeepSeek…
