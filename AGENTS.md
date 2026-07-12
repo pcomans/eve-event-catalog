@@ -48,6 +48,9 @@ lifecycle: `pending → armed → delivering → fired | expired | failed`.
 4. **Tests are written red-green** (failing test first), node:test, no test-framework deps.
 5. **Check current versions before adding any dependency** (npm registry) — never install from
    memory. Pin eve exactly.
+   Never put test files under `agent/` — eve discovery-scans those directories as agent
+   definitions and a stray `*.test.ts` breaks `pnpm dev`/build. Tests for `agent/*` code live in
+   `tests/` (e.g. `tests/agent-tools/`); catalog tests stay next to their modules in `catalog/`.
 6. Every coding step gets an independent Codex review (gpt-5.6-sol, xhigh) before dependent work
    builds on it — orchestrated by the session lead; don't self-certify.
 
