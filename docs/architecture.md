@@ -320,11 +320,89 @@ This is a local-first POC, and says so:
 - Only conversations started through `/catalog/chat` are wakeable (the resume key stays with
   whoever starts a conversation — an eve rule). Wiring another surface — Slack, a web UI —
   would need cross-surface wakes; out of scope here.
-- At production scale, one seam changes: `deliverWake` becomes a publish to a durable topic
-  (Vercel Queues) — fired events are low-volume and must-not-lose, while raw ticks stay filtered
-  at the provider edge. The claim/idempotency semantics were built for at-least-once delivery
-  from day one. Cross-agent dedup, multi-region, and true webhook providers live in the PRD
-  appendix, not in this code.
+- For the production deployment story, see [Deploying to Vercel](#deploying-to-vercel) below.
+  Cross-agent dedup, multi-region, and true webhook providers live in the PRD appendix, not in
+  this code.
+
+## Deploying to Vercel
+
+The catalog's durable *data* is already cloud-shaped (subscriptions, lifecycle, conversation map
+— all in Redis). What's process-shaped is the *watcher* tier: socket handles, poll timers, price
+baselines, seen-sets, and the in-process delivery claim. Deployment is therefore a story about
+where watchers run and how delivery survives multiple instances.
+
+### What deploys today, unchanged in design
+
+- **Agent, conversation/wake API, catalog library** → Vercel Functions + Workflows (eve's native
+  production path).
+- **Registry + conversation map** → Upstash Redis (already there).
+- **Wake delivery** → `deliverWake` becomes a publish to a Vercel Queues topic; a consumer
+  function calls the (now authenticated) wake route. Fired events are low-volume and
+  must-not-lose, while raw ticks stay filtered at the provider edge — the envelope's
+  `subscriptionId`-keyed idempotency was designed for at-least-once delivery from day one. The
+  in-process claim `Set` must become a Redis claim with an **expiring delivery lease plus
+  recovery** (claim-then-publish is a dual write: a crash between the two can strand a
+  subscription in `delivering`).
+- **Expiry timers** → a durable Workflow `sleep()` per subscription, or a sorted-set sweep.
+- **EDGAR** → a scheduled *resource sweep*: one invocation loads all active CIKs, fetches each
+  once, diffs seen-sets in Redis, and routes to every subscriber — the coalescing property
+  survives even though the `setInterval` doesn't. One honesty note: Vercel Cron's floor is
+  1 minute, which cannot preserve the catalog's advertised ~30s freshness; either downgrade
+  `catalog.json` accordingly or drive the sweep from a Workflow `sleep(30s)` loop.
+- **order.filled reconciliation** stays easy everywhere: only the terminal state matters, and a
+  single REST read recovers it after any gap.
+
+Deploying adapters onto different primitives does not dissolve the broker abstraction. The
+abstraction is *subscription → provider adapter → normalized fired event → durable wake* — not
+"all providers share one OS process." Topology hides behind the provider seam exactly the way
+API differences already do.
+
+### The narrow gap
+
+Vercel can *assemble* an event broker from Workflows + Functions + Queues + Cron + Redis. What
+it does not offer is a **continuously-owned outbound connector runtime**: a primitive that holds
+a long-lived connection with an uninterrupted source cursor, shared mutable subscription
+membership, and instance affinity. Websockets are where this bites first; it's the only piece of
+this system with no clean Vercel home today. For this POC, that tier runs locally.
+
+### The future stream adapter (not built; prerequisites known)
+
+The credible Vercel-native shape for the Alpaca streams is a Workflow chaining bounded
+~25-minute socket sessions (steps run as Fluid Function invocations, up to 800s GA / 30 min
+beta; the Workflow supplies the "forever" and carries state between steps). Before building it,
+four problems need real designs — they are correctness issues, not polish:
+
+1. **Historical gap replay.** Re-seeding from the latest REST trade after a reconnect breaks
+   edge-trigger semantics: if the price crosses below the threshold *and recovers* during the
+   gap (prev 151 → gap: 149 then back to 151 → new seed 151), the crossing is silently lost and
+   the agent never wakes. The fix is a persisted per-symbol cursor, historical fetch over the
+   gap, merge with buffered live trades in source order, dedupe by trade id, and run every trade
+   through the predicate. (The local POC has a milder cousin of this hole — a restart during a
+   cross also misses it — which is inside the documented "restart = re-subscribe" boundary.)
+2. **Fenced ownership.** The account allows one market-data connection; chained sessions need a
+   Redis lease *with a fencing token*, so a delayed old session can't coexist with its
+   replacement.
+3. **Dynamic membership.** A subscription arming mid-step can't mutate a running step's memory
+   (no instance affinity); the step must poll Redis membership or be interruptible.
+4. **Idempotent recovery.** A step killed after publishing a wake but before recording
+   completion will retry; publishes and state writes must be idempotent by stable keys.
+
+Cost is not the blocker (an always-on Standard instance is roughly $15–20/month before active
+CPU; market-hours-only is less). The design work is.
+
+### Where the primitive already exists
+
+Worth naming plainly: the missing connector runtime *does* exist elsewhere. **Cloudflare Durable
+Objects** are the closest match — identity-addressed single-threaded actors with durable
+storage, in-memory state, alarms that resurrect an actor that died mid-process, and (since
+[June 2026](https://developers.cloudflare.com/changelog/post/2026-06-19-outbound-connections-keep-dos-alive/))
+outbound WebSocket connections that keep the actor alive (~15 minutes per connection). A
+DO-per-stream / DO-per-CIK-with-30s-alarm mapping fits this system naturally and even preserves
+the EDGAR freshness contract that Cron's 1-minute floor breaks. Gap replay and fencing are still
+required — that correctness work is platform-independent. The pragmatic alternative is one
+always-on container (Fly.io / Railway) running the watcher tier extracted from the eve process;
+the seam it needs (Redis registry + authenticated wake HTTP) already exists. Both are non-Vercel
+components and would need explicit approval under AGENTS.md rule 2; neither is being built now.
 
 ## Map of the repo
 

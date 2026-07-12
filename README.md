@@ -288,6 +288,11 @@ Other current boundaries:
   inject trusted catalog guidance, but the endpoint is not production-hardened.
 - Delivery claims are single-process. A production, multi-instance version would move fired events
   through a durable transport such as Vercel Queues and use cross-instance deduplication.
+- Nearly everything here maps to a Vercel primitive today; the one exception is holding a
+  long-lived outbound connection (the Alpaca websockets) — Vercel has no continuously-owned
+  connector runtime yet, so the watcher tier runs locally for now. The full production mapping,
+  the gap in precise terms, and where that primitive already exists are in
+  [`docs/architecture.md`](docs/architecture.md#deploying-to-vercel).
 - Only conversations started through `/catalog/chat` can be woken. Other interfaces would need to
   hand the catalog their conversations' resume keys (eve's continuation tokens).
 
