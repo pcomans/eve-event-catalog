@@ -36,7 +36,12 @@ lifecycle: `pending → armed → delivering → fired | expired | failed`.
 2. **Every infrastructure component must map to a Vercel primitive.** Non-Vercel components need
    Philipp's explicit approval. Approved so far: LangSmith (tracing), Upstash Redis via Vercel
    Marketplace (registry). Event providers (Alpaca, EDGAR) are subject matter, not infra.
-3. **The catalog is declarative and honest.** `catalog/catalog.json` is the single source of
+3. **Providers use push when the source offers it; polling never scales per subscription.**
+   Prefer the provider's push channel (websocket/stream) — one connection per account/resource,
+   events routed to subscriptions. When polling is unavoidable (EDGAR), poll per upstream
+   *resource* with all subscribers coalesced onto one poll loop — never one loop per
+   subscription. REST reads are for *seeding* state at arm time, not for watching.
+4. **The catalog is declarative and honest.** `catalog/catalog.json` is the single source of
    truth for event types; its JSON Schemas are *enforced* at subscribe() time (Ajv). Entries
    without a registered provider are `"status": "planned"`; `assertCatalogHonesty()` must fail
    the boot if an "active" entry has no handler. Never advertise what isn't implemented.
