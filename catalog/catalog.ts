@@ -12,6 +12,17 @@ import catalogData from "./catalog.json" with { type: "json" };
 // runtime file paths don't survive eve's compile step.
 export const EVENT_TYPES = catalogData.eventTypes as EventType[];
 
+// A duplicate provider.event entry would silently overwrite its own Ajv
+// validator below (Map key collision) — fail loudly at load instead.
+{
+  const seen = new Set<string>();
+  for (const eventType of EVENT_TYPES) {
+    const key = `${eventType.provider}.${eventType.event}`;
+    if (seen.has(key)) throw new Error(`catalog.json has a duplicate event type: ${key}`);
+    seen.add(key);
+  }
+}
+
 // Compiled once at load time, keyed by "provider.event" — the same schema
 // search_events shows the model is the one enforced in subscribe().
 const ajv = new Ajv({ allErrors: true });
@@ -52,7 +63,6 @@ export interface SubscribeInput {
   event: string;
   resource: string;
   params: Record<string, unknown>;
-  once?: boolean;
   expiresAt?: string;
 }
 
@@ -62,13 +72,21 @@ function formatAjvErrors(validate: ValidateFunction): string {
 
 /**
  * Validates the event type and params against catalog.json's JSON Schema,
- * then creates a "pending" registry entry. Validation happens here, at
+ * then creates a "pending" registry entry. Both checks happen here, at
  * subscribe time (inside the same turn), rather than at arm time (after the
- * turn ends) — so the model sees and can correct a bad call immediately.
+ * turn ends) — so the model sees and can correct a bad call immediately,
+ * instead of the subscription silently dying later as "failed".
  */
 export async function subscribe(input: SubscribeInput): Promise<Subscription> {
   const eventType = findEventType(input.provider, input.event);
   if (!eventType) throw new Error(`unknown event type: ${input.provider}.${input.event}`);
+
+  if (eventType.status === "planned") {
+    throw new Error(
+      `${input.provider}.${input.event} is in the catalog but its provider is not implemented yet ` +
+        `(status: planned). Choose a different event type, or tell the user this one isn't available yet.`,
+    );
+  }
 
   const validate = validators.get(`${input.provider}.${input.event}`)!;
   if (!validate(input.params)) {
@@ -81,13 +99,14 @@ export async function subscribe(input: SubscribeInput): Promise<Subscription> {
     event: input.event,
     resource: input.resource,
     params: input.params,
-    once: input.once ?? true,
     expiresAt: input.expiresAt ?? null,
   };
   return createSubscription(newSubscription);
 }
 
 export interface Provider {
+  /** Event names (e.g. "price.crossesBelow") this provider actually implements arm/disarm for. */
+  supportedEvents: string[];
   arm(sub: Subscription): void | Promise<void>;
   disarm(sub: Subscription): void | Promise<void>;
 }
@@ -110,21 +129,38 @@ export function hasProvider(name: string): boolean {
 }
 
 /**
+ * True only if `name` is registered AND declares `event` in its
+ * `supportedEvents` — registering a provider does not, by itself, vouch for
+ * every event catalog.json lists under that provider's name.
+ */
+export function isEventSupported(provider: string, event: string): boolean {
+  return providers.get(provider)?.supportedEvents.includes(event) ?? false;
+}
+
+/**
  * Fails loudly if catalog.json advertises an "active" event type with no
- * registered provider. Call this once, after all providers for the current
- * build are registered (e.g. at the bottom of agent/channels/catalog.ts,
- * after any provider-registering imports run). "planned" entries are exempt
- * by design — that status exists precisely for events not implemented yet.
+ * matching registered-and-supporting provider. Call this once, after all
+ * providers for the current build are registered (e.g. at the bottom of
+ * agent/channels/catalog.ts, after any provider-registering imports run —
+ * ES module imports fully evaluate before the importing module's own
+ * top-level code, so a provider registered via a top-of-file import is
+ * guaranteed visible here). "planned" entries are exempt by design — that
+ * status exists precisely for events not implemented yet. Task #4 must, as
+ * part of registering the real alpaca provider: declare `supportedEvents`
+ * for what it actually implements, flip the matching catalog.json entries
+ * from "planned" to "active", and call this. Task #8 does the same for
+ * edgar.
  */
 export function assertCatalogHonesty(): void {
   const unimplemented = EVENT_TYPES.filter(
-    (eventType) => eventType.status !== "planned" && !hasProvider(eventType.provider),
+    (eventType) => eventType.status !== "planned" && !isEventSupported(eventType.provider, eventType.event),
   );
   if (unimplemented.length > 0) {
     const names = unimplemented.map((e) => `${e.provider}.${e.event}`).join(", ");
     throw new Error(
-      `catalog.json advertises event types with no registered provider: ${names}. ` +
-        `Register the provider, or mark the entry "status": "planned" until it exists.`,
+      `catalog.json advertises event types with no registered, supporting provider: ${names}. ` +
+        `Register the provider (with this event in its supportedEvents), or mark the entry ` +
+        `"status": "planned" until it exists.`,
     );
   }
 }

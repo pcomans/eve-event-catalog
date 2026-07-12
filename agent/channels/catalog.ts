@@ -1,7 +1,7 @@
 import { defineChannel, GET, POST } from "eve/channels";
 
 import { getConversation, listSubscriptions, recordConversation } from "#catalog/registry.ts";
-import { armPendingForConversation } from "#catalog/wake.ts";
+import { armPendingForConversation, buildWakeEnvelope } from "#catalog/wake.ts";
 
 // The catalog channel owns the demo conversation: it starts each session on a
 // stable, caller-chosen `conversationId` and later "wakes" it by sending
@@ -65,10 +65,12 @@ export default defineChannel({
         conversationId,
         payload,
         subscribedAt: subscribedAtOverride,
+        firedAt: firedAtOverride,
       } = (await req.json()) as {
         conversationId: string;
         payload?: Record<string, unknown>;
         subscribedAt?: string;
+        firedAt?: string;
       };
 
       const known = await getConversation(conversationId);
@@ -80,17 +82,16 @@ export default defineChannel({
         );
       }
 
-      const firedAt = new Date().toISOString();
-      // subscribedAt override is an explicit top-level request field (real
-      // subscriptions pass their armedAt); payload is spread first so a
-      // fired subscription's own field names can never shadow the
-      // channel-generated timestamps below.
+      // subscribedAt/firedAt overrides are explicit top-level request
+      // fields (real subscriptions pass sub.armedAt and the exact instant
+      // wake.ts already stored on the subscription, so Redis and the
+      // agent's envelope show the same timestamp); a synthetic wake with no
+      // subscription (AT-2) mints its own. `payload` is nested under its
+      // own key in buildWakeEnvelope, not spread, so nothing in it can ever
+      // shadow these two fields.
       const subscribedAt = subscribedAtOverride ?? known.startedAt;
-      const wakeMessage = `[event-catalog wake] ${JSON.stringify({
-        ...payload,
-        subscribedAt,
-        firedAt,
-      })}`;
+      const firedAt = firedAtOverride ?? new Date().toISOString();
+      const wakeMessage = `[event-catalog wake] ${JSON.stringify(buildWakeEnvelope(subscribedAt, firedAt, payload))}`;
 
       const session = await send(wakeMessage, { auth: null, continuationToken: conversationId });
 

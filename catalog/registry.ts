@@ -39,7 +39,6 @@ export interface NewSubscriptionInput {
   event: string;
   resource: string;
   params: Record<string, unknown>;
-  once: boolean;
   expiresAt: string | null;
 }
 
@@ -51,7 +50,6 @@ export async function createSubscription(input: NewSubscriptionInput): Promise<S
     event: input.event,
     resource: input.resource,
     params: input.params,
-    once: input.once,
     expiresAt: input.expiresAt,
     status: "pending",
     createdAt: new Date().toISOString(),
@@ -61,6 +59,17 @@ export async function createSubscription(input: NewSubscriptionInput): Promise<S
   };
   await writeSubscription(sub);
   return sub;
+}
+
+/** Test-hygiene helper: removes a subscription and its index entry. Not used by product code. */
+export async function deleteSubscription(id: string): Promise<void> {
+  await redis.del(SUB_KEY(id));
+  await redis.srem(SUB_INDEX_KEY, id);
+}
+
+/** Test-hygiene helper: removes a conversation record. Not used by product code. */
+export async function deleteConversation(conversationId: string): Promise<void> {
+  await redis.del(CONV_KEY(conversationId));
 }
 
 export async function getSubscription(id: string): Promise<Subscription | null> {

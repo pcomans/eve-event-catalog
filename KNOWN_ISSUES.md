@@ -64,7 +64,22 @@ reporting success to the OTel pipeline — no error, no log. The var is provisio
 env store (development) as of 2026-07-11, so `vercel env pull` includes it; if traces ever stop
 appearing, check this var first.
 
-## 7. Assorted
+## 7. A wake POSTed from inside `turn.completed` races session parking — and eve handles it correctly
+
+`emitTurnEpilogue` (eve's compiled `harness/emission.js`) awaits the `turn.completed` emit — which
+drives our channel event handler to completion — *before* emitting `session.waiting`. So a
+`provider.arm()` that calls `deliverWake()` synchronously sends its loopback `POST /catalog/wake`
+(→ `send()` on the same continuation token) while the session hasn't technically parked yet.
+
+Verified experimentally (`catalog/wake.ts`'s `armPendingForConversation` doc comment has the
+detail): a throwaway provider whose `arm()` called `deliverWake()` with zero delay — worse than any
+real provider, which needs at least a network round trip to detect a tick — still landed the wake
+as the correctly-ordered next turn on the *same* session. eve's local dev (`world-local`) backend
+buffers the reentrant `send()` rather than falling back to a new session. No extra defer/scheduling
+machinery was added; the existing session-id-mismatch check in the wake route stays as an automatic
+backstop in case this behaves differently against a different workflow backend (e.g. in production).
+
+## 8. Assorted
 
 - The dev server listens on port **2000**, not 3000 as eve's own docs curl examples suggest.
 - Local durable workflow state lives in `.workflow-data/` (gitignored). If sessions look stuck

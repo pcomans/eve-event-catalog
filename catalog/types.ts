@@ -49,7 +49,6 @@ export interface Subscription {
   event: string;
   resource: string;
   params: Record<string, unknown>;
-  once: boolean;
   expiresAt: string | null;
   status: SubscriptionStatus;
   createdAt: string;

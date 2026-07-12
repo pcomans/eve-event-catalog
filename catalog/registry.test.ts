@@ -4,6 +4,8 @@ import { test } from "node:test";
 
 import {
   createSubscription,
+  deleteConversation,
+  deleteSubscription,
   getConversation,
   getSubscription,
   listSubscriptionsByStatus,
@@ -13,21 +15,23 @@ import {
 
 // These tests hit a real Redis instance (Upstash, via UPSTASH_REDIS_REST_URL /
 // UPSTASH_REDIS_REST_TOKEN) — no mocking, per the registry's job (survive
-// hot-reload/restart). Each test uses a fresh conversationId so runs don't
-// collide; test data is intentionally left behind (documented POC dev
-// behavior, not a bug).
+// hot-reload/restart). Every conversationId/subscription this file creates
+// is namespaced "test:" and deleted in a t.after() hook, so a human reading
+// `GET /catalog/subscriptions` on a shared dev Redis doesn't wade through
+// leftover test rows.
+const testConversationId = () => `test:${randomUUID()}`;
 
-test("createSubscription then getSubscription round-trips a pending subscription", async () => {
-  const conversationId = `test-${randomUUID()}`;
+test("createSubscription then getSubscription round-trips a pending subscription", async (t) => {
+  const conversationId = testConversationId();
   const created = await createSubscription({
     conversationId,
     provider: "alpaca",
     event: "price.crossesBelow",
     resource: "NVDA",
     params: { threshold: 150 },
-    once: true,
     expiresAt: null,
   });
+  t.after(() => deleteSubscription(created.id));
 
   assert.equal(created.status, "pending");
   assert.equal(created.armedAt, null);
@@ -38,17 +42,17 @@ test("createSubscription then getSubscription round-trips a pending subscription
   assert.deepEqual(fetched, created);
 });
 
-test("updateSubscription transitions status and persists lastError", async () => {
-  const conversationId = `test-${randomUUID()}`;
+test("updateSubscription transitions status and persists lastError", async (t) => {
+  const conversationId = testConversationId();
   const sub = await createSubscription({
     conversationId,
     provider: "alpaca",
     event: "order.filled",
     resource: "order-123",
     params: {},
-    once: true,
     expiresAt: null,
   });
+  t.after(() => deleteSubscription(sub.id));
 
   const armed = await updateSubscription(sub.id, { status: "armed", armedAt: new Date().toISOString() });
   assert.equal(armed.status, "armed");
@@ -61,9 +65,9 @@ test("updateSubscription transitions status and persists lastError", async () =>
   assert.equal(failed.armedAt, armed.armedAt);
 });
 
-test("listSubscriptionsByStatus filters by conversation and status", async () => {
-  const conversationId = `test-${randomUUID()}`;
-  const otherConversationId = `test-${randomUUID()}`;
+test("listSubscriptionsByStatus filters by conversation and status", async (t) => {
+  const conversationId = testConversationId();
+  const otherConversationId = testConversationId();
 
   const pending = await createSubscription({
     conversationId,
@@ -71,7 +75,6 @@ test("listSubscriptionsByStatus filters by conversation and status", async () =>
     event: "price.crossesAbove",
     resource: "NVDA",
     params: { threshold: 200 },
-    once: true,
     expiresAt: null,
   });
   const armedInSameConversation = await createSubscription({
@@ -80,20 +83,26 @@ test("listSubscriptionsByStatus filters by conversation and status", async () =>
     event: "filing.new",
     resource: "AAPL",
     params: {},
-    once: true,
     expiresAt: null,
   });
   await updateSubscription(armedInSameConversation.id, { status: "armed" });
 
-  await createSubscription({
+  const otherConversationSub = await createSubscription({
     conversationId: otherConversationId,
     provider: "alpaca",
     event: "price.crossesBelow",
     resource: "NVDA",
     params: { threshold: 100 },
-    once: true,
     expiresAt: null,
   });
+
+  t.after(() =>
+    Promise.all([
+      deleteSubscription(pending.id),
+      deleteSubscription(armedInSameConversation.id),
+      deleteSubscription(otherConversationSub.id),
+    ]),
+  );
 
   const pendingForConversation = await listSubscriptionsByStatus(conversationId, "pending");
   assert.deepEqual(
@@ -102,8 +111,9 @@ test("listSubscriptionsByStatus filters by conversation and status", async () =>
   );
 });
 
-test("recordConversation preserves the original startedAt across repeat calls", async () => {
-  const conversationId = `test-${randomUUID()}`;
+test("recordConversation preserves the original startedAt across repeat calls", async (t) => {
+  const conversationId = testConversationId();
+  t.after(() => deleteConversation(conversationId));
 
   const first = await recordConversation(conversationId, "session-a");
   const second = await recordConversation(conversationId, "session-a");

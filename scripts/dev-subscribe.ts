@@ -1,11 +1,14 @@
 // Dev-only helper for exercising the catalog lifecycle before task #4's
 // alpaca provider exists to arm anything for real. Hand-inserts a "pending"
-// subscription directly into the registry (bypassing the model/tools), so a
-// running dev server can be used to verify: pending -> armed on turn
-// completion, and (with a short --expires-in) the expiry wake.
+// subscription directly into the registry (bypassing catalog.subscribe(),
+// the model/tools, AND the catalog's "planned" gate — deliberately, since
+// this script's whole job is exercising pending -> armed -> expired
+// wiring before any provider is registered), so a running dev server can be
+// used to verify: pending -> armed on turn completion, and (with a short
+// --expires-in) the expiry wake.
 //
 // Usage: node scripts/dev-subscribe.ts <conversationId> [expiresInSeconds]
-import { subscribe } from "../catalog/catalog.ts";
+import { createSubscription } from "../catalog/registry.ts";
 
 const [conversationId, expiresInSecondsArg] = process.argv.slice(2);
 
@@ -17,9 +20,9 @@ if (!conversationId) {
 const expiresInSeconds = expiresInSecondsArg ? Number(expiresInSecondsArg) : undefined;
 const expiresAt = expiresInSeconds
   ? new Date(Date.now() + expiresInSeconds * 1000).toISOString()
-  : undefined;
+  : null;
 
-const sub = await subscribe({
+const sub = await createSubscription({
   conversationId,
   provider: "alpaca",
   event: "price.crossesBelow",
