@@ -11,8 +11,9 @@ import { search } from "#catalog/catalog.ts";
 export default defineTool({
   description:
     'Search the Event Catalog for subscribable event types — things you can wait on, like a stock ' +
-    'price crossing a threshold, a new SEC filing, or an order reaching "filled". Always call this ' +
-    "before subscribe_event: it returns the exact provider/event names, the JSON Schema subscribe_event's " +
+    "price crossing a threshold, a new SEC filing, or an order reaching a terminal state (filled, " +
+    'canceled, rejected, or expired — not just "filled"). Always call this before subscribe_event: ' +
+    "it returns the exact provider/event names, the JSON Schema subscribe_event's " +
     "params must satisfy, each provider's metadata (freshness, latency, auth, cost, durability) so you " +
     "can pick a source for real reasons, and that event type's onWake — guidance for handling its wake " +
     "once you're subscribed (e.g. a re-check rule, or how to interpret its snapshot fields) that arrives " +

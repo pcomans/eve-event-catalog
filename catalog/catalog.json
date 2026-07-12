@@ -98,7 +98,7 @@
         "cost": "free",
         "durability": "in-process poller; lost on server restart"
       },
-      "onWake": "Report the filing conversationally: form type (payload.snapshot.form), company (payload.snapshot.company), and filing date (payload.snapshot.filingDate); include the link (payload.snapshot.url) if useful. No re-check is needed — unlike a price level, a published SEC filing is immutable, so there's nothing to re-verify before reporting it."
+      "onWake": "Report the filing conversationally: form type (payload.snapshot.form), company (payload.snapshot.company), filing date (payload.snapshot.filingDate), and the accession number (payload.snapshot.accessionNumber); include the link (payload.snapshot.url) if useful. No re-check is needed — unlike a price level, a published SEC filing is immutable, so there's nothing to re-verify before reporting it."
     }
   ]
 }
