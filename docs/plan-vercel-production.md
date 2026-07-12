@@ -78,45 +78,86 @@ memory, dies together." Each must land with red-green tests:
    consumers dedupe by `subscriptionId` (one-shot semantics make this the natural idempotency
    key). Test: crash-between-claim-and-publish recovers; duplicate publish wakes once.
 
-## Architecture target
+## Architecture target — ONE Vercel project, three services (settled 2026-07-12)
+
+Phase 0 (below) resolved the topology. The connector CANNOT live in the eve app (eve vendors
+`@workflow/*` at `5.0.0-beta.x` privately; the public `workflow` package is `4.6.0`,
+major-incompatible, and both fight over `/.well-known/workflow/*`). Philipp chose **Vercel
+Services** (GA, multi-framework in one project, private bindings, shared Redis, atomic deploys)
+for both the connector and the dashboard — so "sibling service" keeps the single-deploy,
+everything-on-Vercel story intact.
 
 ```
-Vercel project(s)
-  eve app (Functions + eve's workflows): agent, catalog API, wake route (now authenticated)
-  connector runtime: Workflow chaining ~25-min socket-session steps
-        (market-data stream + trade_updates stream), gap replay on each step start
-  EDGAR: scheduled resource sweep (Workflow sleep(30s) loop preferred over Cron to keep the
-        ~30s freshness contract; one sweep coalesces all CIKs; seen-sets in Redis)
-  expiry: durable Workflow sleep per subscription OR sorted-set sweep (pick in design)
-  delivery: deliverWake → Vercel Queues topic → consumer → authenticated POST /catalog/wake
-  event history: NEW append-only Redis stream (all wakes, arms, fires, expiries, failures)
-        written by wake.ts — this feeds the public site
-  public site: read-only dashboard (hosting option per Phase 0)
-Upstash Redis: registry, conversation maps, cursors, leases, seen-sets, event history
+Vercel project (Vercel Services — one project, three services, private bindings)
+  ┌ service: eve app (Nitro → Functions): agent, catalog API, authenticated wake route
+  ├ service: connector runtime (public `workflow` 4.6.0 pkg): Workflow chaining ~25-min
+  │     socket-session steps (market-data + trade_updates streams), gap replay on each step
+  │     start; EDGAR scheduled sweep (Workflow sleep(30s) loop preferred over Cron to keep the
+  │     ~30s freshness; one sweep coalesces all CIKs); expiry (durable sleep OR sorted-set
+  │     sweep — pick in design). Calls eve's wake route via private binding, not public hop.
+  └ service: Next.js observatory (read-only public site): equity/positions, subscriptions
+        table, event feed, full transcripts. Private-binds to eve/Redis; public via top-level
+        rewrite rule.
+  delivery: deliverWake → Vercel Queues topic (@vercel/queue) → consumer → wake route
+  event history: NEW append-only Redis stream (all wakes/arms/fires/expiries/failures) written
+        by wake.ts — feeds the observatory
+Upstash Redis: registry, conversation maps, cursors, leases, seen-sets, event history — shared
+        across all three services
 ```
 
-## Phase 0 — feasibility gates (research; may already be answered)
+## Phase 0 — feasibility gates (RESOLVED 2026-07-12 by `deploy-research` + `dashboard-research`)
 
-Two Explore agents (`deploy-research`, `dashboard-research`) were dispatched 2026-07-12 to
-answer these; if their reports are in the prior session's transcript, use them, else re-run:
+Findings folded in below; the topology forks (gates 1 & 6) were brought to Philipp and decided.
+Two items remain as **empirical smoke-tests inside the build** (not blockers to starting): #2
+and #3's Nitro caveat. New gate 7 (unbounded-workflow API) is the only fresh research to run.
 
-1. Can the public `workflow` npm package coexist with eve's pinned internal @workflow/* in ONE
-   app (build integration, route collisions at /.well-known/workflow)? If not → the connector
-   runtime becomes a **sibling app** (same repo or second project) sharing Redis and calling the
-   eve app's wake route over HTTP. Also: Vercel Services (multi-framework projects) viability.
-2. Does world-vercel buffer a wake `send()` arriving pre-park the way world-local does
-   (KNOWN_ISSUES #7)? Must be re-verified on a deployed instance before trusting arming.
-3. Vercel Queues current API/package/plan requirements; usable from Nitro/non-Next apps?
-4. Alpaca historical trades REST on the FREE IEX feed (gap replay depends on it): recency
-   restrictions, pagination, trade ids for dedupe.
-5. eve production deploy mechanics (build command, custom channel routes → Functions, env,
-   Agent Runs) + whether a deployed function may POST its own public URL (loopback wake).
-6. Dashboard hosting pick: eve-channel-served HTML vs Vercel Services multi-app vs separate
-   Next.js project on the same Redis.
+1. **Same-app Workflows: INFEASIBLE → sibling service (DECIDED: Vercel Services).** eve vendors
+   `@workflow/*` at `5.0.0-beta.x` privately (`#compiled/@workflow/...`, not app-importable); the
+   public `workflow` package is `4.6.0` — major-incompatible, and both would claim
+   `/.well-known/workflow/v1/*`. eve owns its Nitro build (no app-editable `nitro.config.ts`), so
+   there's no clean hook to mount `@workflow/nitro`. Connector runs as its own **Vercel Service**
+   (public `workflow` pkg) in the same project, private-bound to eve, shared Redis. (Philipp
+   chose Vercel Services over a separate project.)
+2. **world-vercel pre-park buffering (#7): structurally LIKELY to hold, must still test.** eve's
+   buffering/ordering (`session-delivery-hook.js`, `hook-ownership.js` forcing durable hook
+   registration before "parked" returns via `getConflict()`) is world-agnostic execution-layer
+   code, shipped unmodified to both backends — so the logical guarantee should transfer. BUT
+   world-vercel registration is a network round-trip vs local's in-memory write, which can change
+   the race-window size. **Hard test on a real preview deploy before trusting arming (Phase 6).**
+3. **Vercel Queues: CONFIRMED.** `@vercel/queue@0.4.0`, `send()`/`handleCallback()`,
+   `experimentalTriggers: [{type:"queue/v2beta", topic}]` makes the consumer route private, TTL
+   60s–7d, visibility 0–60min. **Not Pro-gated** (all plans). Works with `vercel dev`. **Open
+   caveat: no doc confirms clean use from a Nitro route — smoke-test `send`/`handleCallback` from
+   Nitro early in Phase 1.**
+4. **Alpaca gap replay on free IEX: CONFIRMED (moderate confidence).** The 15-min delay is a SIP
+   restriction only — IEX historical trades query up to "now" on the free tier. `GET
+   /v2/stocks/{symbol}/trades`, `page_token` pagination, trade obj `i`(id)+`x`(exch)+`t`(ns ts);
+   dedupe key `i`+`x`+`t`. Order reconciliation is plain REST: `GET /v2/orders?status=closed`
+   with `after`/`until` bracketing the gap — no websocket replay needed. Caveat: IEX is one
+   venue, not consolidated tape (may miss off-IEX prints — acceptable for the POC).
+5. **eve prod deploy: CONFIRMED.** Ordinary Vercel project; `eve build` emits Vercel Build Output
+   when `VERCEL` is set; deploy via `vercel deploy` (**NOT `--prebuilt`**); framework auto-
+   detected; custom channel routes → Nitro → Functions. Route-auth secrets must be **real Vercel
+   env vars** (not baked into `.env.local`). Model creds: AI Gateway via OIDC (automatic on
+   Vercel) or explicit keys. **Self-invoking wake loopback works UNLESS Deployment Protection is
+   on → then attach `VERCEL_AUTOMATION_BYPASS_SECRET` to the wake POST.** Agent Runs tab exists
+   but is gated (team enablement) — not a programmatic API, don't depend on it.
+6. **Dashboard: DECIDED — Next.js as a Vercel Service.** No eve session-list API exists (grepped
+   dist); track sessionIds in Redis (already do). Reuse eve's `defaultMessageReducer` (`eve/react`
+   / `eve/client`) to render transcripts from `GET /eve/v1/session/:id/stream?startIndex=0`
+   server-side — no hand-parsing. `withEve()` (`eve/next`) is the idiomatic same-project mount.
+   eve ships a headless hook (`useEveAgent`) + reducer, NOT a prebuilt chat page — read-only =
+   render with the reducer, never render a composer, never call `send`. Equity/positions/
+   subscriptions/feed have no eve equivalent → custom Next.js over Redis + Alpaca account.
+7. **NEW — unbounded-workflow primitive (open; run before Phase 2).** The always-on story (both
+   the connector's chained socket sessions AND the perpetual campaign) rests on one mechanism:
+   how the public `workflow@4.6.0` package expresses "run forever" (ChatPRD/Rauch: "run forever
+   until I run out of tokens" — [link](https://www.chatprd.ai/how-i-ai/vercel-ceo--guillermo-rauchs-production-ready-v0-workflows)).
+   Pin the exact API: `step.sleep` + recursion loop vs an explicit continue-as-new vs chained
+   invocation, and where duration/step ceilings actually bite. Answer shapes Phase 2 & 4.
 
-Phase 0 outputs go into `docs/architecture.md` and adjust Phases 2/4 below. **If gate 1 or 6
-forks the topology (same-app Workflows fail → sibling service; dashboard hosting choice), STOP
-and ask Philipp before committing to the branch** (decision 5 above) — do not pick autonomously.
+Phase 0 outputs go into `docs/architecture.md`. Both topology forks are now decided (above); any
+*new* fork that emerges mid-build STOPs and asks Philipp before committing (decision 5).
 
 ## Phases (each: build → tests green → live verification → Codex gate → commit/push)
 
@@ -139,17 +180,28 @@ CIKs preserved; seen-sets already Redis-shaped — move them from memory); expir
 sleep or sorted-set sweep. catalog.json freshness stays honest either way.
 
 **Phase 4 — the mandate agent (the showcase's engine).**
+- **Model: DeepSeek V4-Pro via Vercel AI Gateway** (Philipp's pick 2026-07-12: "latest DeepSeek…
+  pro"; verified current — V4 shipped ~Apr 2026; V4-Pro is the high-capability/agentic tier
+  positioned for multi-step reasoning + tool use, 1.6T/49B-active, tool calls + reasoning +
+  implicit caching. Pricier than V4-Flash but still cheap, and cost is explicitly not a
+  constraint here — Pro chosen for better trade quality on the public page). eve reaches it
+  through AI Gateway (OIDC, automatic on Vercel — no direct DeepSeek key in prod; local dev needs
+  `AI_GATEWAY_API_KEY`). Gateway model id `deepseek/deepseek-v4-pro`. **GOTCHA: use the explicit
+  `deepseek-v4-pro` id, NOT the legacy `deepseek-chat`/`deepseek-reasoner` aliases — those
+  deprecate 2026-07-24 and would break the campaign mid-run.** Bonus for the pitch: a DeepSeek
+  agent on AI Gateway is itself a Gateway-breadth story for Pranay.
 - **Sell capability**: extend the order tools to position-bounded selling (market sell of held
   quantities only — no shorting, no margin; paper host stays hard-coded). This is a
   capability-bounds change: red-green tests + Codex gate scrutiny on the bounds.
-- **Campaign guardrails — minimal (confirmed 2026-07-12: "it's paper, keep it light").** The one
-  cap that genuinely matters is a **daily token/turn budget** for the agent (cost + runaway
-  protection), enforced in code and env-configurable. The paper host + fully-autonomous open
-  mandate are the intended posture, so do NOT add per-trade notional caps, max-trades-per-day, or
-  max-concurrent-subscription limits as hard structural blockers — they constrain the very
-  autonomy that's the showcase. Keep the existing paper-only / buy-side / market / day-order
-  bounds that already exist (those are correctness, not judgment). Sell stays position-bounded
-  (below). If a single cost cap needs a number, propose one; Philipp confirms at deploy.
+- **Campaign guardrails — minimal (confirmed 2026-07-12: "it's paper, keep it light"; cost is
+  explicitly not a constraint).** The remaining cap is purely **runaway/loop protection** (a
+  per-day turn ceiling so a stuck tool-loop can't spin forever), NOT a cost cap — keep it small
+  and env-configurable. The paper host + fully-
+  autonomous open mandate are the intended posture, so do NOT add per-trade notional caps,
+  max-trades-per-day, or max-concurrent-subscription limits as hard structural blockers — they
+  constrain the very autonomy that's the showcase. Keep the existing paper-only / buy-side /
+  market / day-order bounds that already exist (those are correctness, not judgment). Sell stays
+  position-bounded (below).
 - **Instructions rewrite** for the standing mandate: manage the paper portfolio via events —
   research, pick watches (price crossings both directions now meaningful, EDGAR filings as
   signals), size positions, realize P&L, always leave a subscription armed (the campaign must
