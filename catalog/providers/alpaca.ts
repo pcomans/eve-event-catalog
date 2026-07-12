@@ -1,27 +1,31 @@
+// See alpaca-client.ts's import comment: streaming types live under the
+// `streaming` namespace export, not the root barrel.
+import { streaming } from "@alpacahq/alpaca-trade-api";
+
+const { STATE } = streaming;
+type StockDataStream = streaming.StockDataStream;
+type StreamTrade = streaming.StreamTrade;
+type TradeUpdate = streaming.TradeUpdate;
+type TradingStream = streaming.TradingStream;
+
 import type { Subscription } from "../types.ts";
 import { registerProvider, type Provider } from "../catalog.ts";
 import { deliverWake } from "../wake.ts";
 import { logCatalog } from "../log.ts";
 import { crosses, type CrossingDirection } from "./crossing.ts";
-import {
-  AlpacaStream,
-  getLatestTrade,
-  getOrder,
-  type AlpacaOrder,
-  type DataFeed,
-  type Trade,
-} from "./alpaca-client.ts";
+import { alpacaClient, getLatestTrade, getOrder, normalizeOrder, recordTestFeedTrade, type AlpacaOrder, type DataFeed } from "./alpaca-client.ts";
 
-// ALPACA_DATA_FEED=test switches the shared stream (and, implicitly, seeding
-// behavior below) to Alpaca's 24/7 synthetic FAKEPACA feed for off-hours
-// development; unset or "iex" uses the real feed. Read once at module load —
-// changing it requires a process restart anyway (KNOWN_ISSUES.md #2), same
-// as every other env var here.
+// ALPACA_DATA_FEED=test switches the shared market-data stream (and,
+// implicitly, seeding behavior below) to Alpaca's 24/7 synthetic FAKEPACA
+// feed for off-hours development; unset or "iex" uses the real feed. Read
+// once at module load — changing it requires a process restart anyway
+// (KNOWN_ISSUES.md #2), same as every other env var here.
 const FEED = (process.env.ALPACA_DATA_FEED ?? "iex") as DataFeed;
+const TEST_STREAM_URL = "wss://stream.data.alpaca.markets/v2/test";
 
-// One shared connection for every price subscription — the free market data
-// plan allows exactly one. Lazily connects on the first subscribe() call.
-const stream = new AlpacaStream(FEED);
+function log(line: string) {
+  console.log(`[alpaca-stream] ${line}`);
+}
 
 interface PriceState {
   sub: Subscription;
@@ -33,18 +37,43 @@ interface PriceState {
 }
 
 const priceSubs = new Map<string, PriceState>();
-const orderPolls = new Map<string, ReturnType<typeof setInterval>>();
 
-const TERMINAL_ORDER_STATUSES = new Set(["filled", "canceled", "rejected", "expired"]);
-const ORDER_POLL_INTERVAL_MS = 3000;
+// One shared market-data connection for every price subscription — the free
+// plan allows exactly one. Lazily connects on the first arm().
+let stockStream: StockDataStream | null = null;
+
+function ensureStockStream(): StockDataStream {
+  if (stockStream) return stockStream;
+
+  // The test feed has no first-class `feed` value — it's reached by
+  // overriding the stream's URL entirely (the SDK's documented mechanism for
+  // routing through a different endpoint), so `feed` here is a harmless
+  // placeholder once `url` is set.
+  const stream = alpacaClient.marketData.stockStream(
+    FEED === "test" ? { feed: "iex", url: TEST_STREAM_URL } : { feed: FEED },
+  );
+  stream.onStateChange((state) => {
+    if (state === STATE.CONNECTED) log(`connect feed=${FEED}`);
+    if (state === STATE.AUTHENTICATED) log(`authenticated feed=${FEED}`);
+  });
+  stream.onReconnecting((attempt) => log(`reconnecting feed=${FEED} attempt=${attempt}`));
+  stream.onReconnected(() => log(`reconnected feed=${FEED}`));
+  stream.onError((err) => log(`error feed=${FEED} ${err}`));
+  stream.onTrade(handleTrade);
+  stream.connect();
+  stockStream = stream;
+  return stream;
+}
 
 /**
  * Dispatches one incoming trade tick to every price subscription watching
- * that symbol. Registered once, at module load, rather than per
- * subscription — the stream delivers ticks for the shared connection as a
- * whole, not per watcher.
+ * that symbol. Registered once, on the shared stream, rather than per
+ * subscription — the stream delivers ticks for the connection as a whole,
+ * not per watcher.
  */
-function handleTrade(trade: Trade): void {
+function handleTrade(trade: StreamTrade): void {
+  if (FEED === "test") recordTestFeedTrade({ price: trade.price, timestamp: trade.timestamp.toISOString() });
+
   for (const state of priceSubs.values()) {
     if (state.symbol !== trade.symbol) continue;
 
@@ -65,15 +94,13 @@ function handleTrade(trade: Trade): void {
           price: trade.price,
           threshold: state.threshold,
           previousPrice: state.previous,
-          tradeAt: trade.timestamp,
+          tradeAt: trade.timestamp.toISOString(),
         },
       });
     }
     state.previous = trade.price;
   }
 }
-
-stream.onTrade(handleTrade);
 
 async function armPriceCross(sub: Subscription): Promise<void> {
   const direction: CrossingDirection = sub.event === "price.crossesBelow" ? "below" : "above";
@@ -83,7 +110,10 @@ async function armPriceCross(sub: Subscription): Promise<void> {
   const state: PriceState = { sub, direction, threshold, symbol, previous: null };
   priceSubs.set(sub.id, state);
 
-  await stream.subscribe([symbol]);
+  const stream = ensureStockStream();
+  await stream.whenAuthenticated();
+  stream.subscribeForTrades([symbol]);
+  log(`subscribed feed=${FEED} trades=["${symbol}"]`);
 
   if (FEED === "iex") {
     const trade = await getLatestTrade(symbol, FEED);
@@ -94,13 +124,13 @@ async function armPriceCross(sub: Subscription): Promise<void> {
   // the first stream tick instead (see handleTrade above).
 }
 
-async function disarmPriceCross(sub: Subscription): Promise<void> {
+function disarmPriceCross(sub: Subscription): void {
   const state = priceSubs.get(sub.id);
   if (!state) return;
   priceSubs.delete(sub.id);
 
   const stillWatched = [...priceSubs.values()].some((other) => other.symbol === state.symbol);
-  if (!stillWatched) await stream.unsubscribe([state.symbol]);
+  if (!stillWatched && stockStream) stockStream.unsubscribeFromTrades([state.symbol]);
 }
 
 function orderSnapshot(order: AlpacaOrder): Record<string, unknown> {
@@ -114,49 +144,80 @@ function orderSnapshot(order: AlpacaOrder): Record<string, unknown> {
   };
 }
 
-async function pollOrderOnce(sub: Subscription): Promise<void> {
-  let order: AlpacaOrder;
-  try {
-    order = await getOrder(sub.resource);
-  } catch (err) {
-    // A transient network hiccup shouldn't kill the poll loop (or the
-    // process, via an unhandled rejection) — log and let the next tick try
-    // again; no retry bookkeeping needed since setInterval already provides it.
-    const message = err instanceof Error ? err.message : String(err);
-    logCatalog("order-poll-failed", sub, { error: message });
+const TERMINAL_ORDER_STATUSES = new Set(["filled", "canceled", "rejected", "expired"]);
+// trade_updates event names, not order statuses — "fill" (not "filled") is
+// the completed-order event; "partial_fill" and everything else (new,
+// pending_new, replaced, done_for_day, stopped, calculated, suspended, ...)
+// isn't terminal for our purposes and is ignored.
+const TERMINAL_TRADE_EVENTS = new Set(["fill", "canceled", "rejected", "expired"]);
+
+const orderFilledSubs = new Map<string, Subscription>(); // orderId -> sub
+
+// One shared trading-updates connection for every order.filled subscription
+// — opened when the first one arms, closed when the last one disarms.
+let tradingStream: TradingStream | null = null;
+
+function ensureTradingStream(): TradingStream {
+  if (tradingStream) return tradingStream;
+
+  const stream = alpacaClient.trading.stream();
+  stream.onStateChange((state) => {
+    if (state === STATE.CONNECTED) log("trade-updates connect");
+    if (state === STATE.AUTHENTICATED) log("trade-updates authenticated");
+  });
+  stream.onReconnecting((attempt) => log(`trade-updates reconnecting attempt=${attempt}`));
+  stream.onReconnected(() => log("trade-updates reconnected"));
+  stream.onError((err) => log(`trade-updates error ${err}`));
+  stream.onConnect(() => {
+    stream.subscribeTradeUpdates();
+    log("trade-updates subscribed");
+  });
+  stream.onTradeUpdate(handleTradeUpdate);
+  stream.connect();
+  tradingStream = stream;
+  return stream;
+}
+
+function handleTradeUpdate(update: TradeUpdate): void {
+  const orderId = update.order.id;
+  if (!orderId) return;
+  const sub = orderFilledSubs.get(orderId);
+  if (!sub) return; // an update for an order we're not watching (or already delivered)
+  if (!TERMINAL_TRADE_EVENTS.has(update.event)) return;
+
+  void deliverWake(sub, { reason: "fired", snapshot: orderSnapshot(normalizeOrder(update.order)) });
+}
+
+async function armOrderFilled(sub: Subscription): Promise<void> {
+  const orderId = sub.resource;
+
+  // REST survives only as the arm-time seed: if the order already reached a
+  // terminal state before this subscription armed (e.g. a market order that
+  // filled between submit and arm), wake immediately — a push event for a
+  // transition that already happened will never arrive on the stream.
+  const order = await getOrder(orderId);
+  if (TERMINAL_ORDER_STATUSES.has(order.status)) {
+    await deliverWake(sub, { reason: "fired", snapshot: orderSnapshot(order) });
     return;
   }
 
-  if (!TERMINAL_ORDER_STATUSES.has(order.status)) return;
-
-  const timer = orderPolls.get(sub.id);
-  if (timer) clearInterval(timer);
-  orderPolls.delete(sub.id);
-
-  // Every terminal status (not just "filled") wakes the agent with the real
-  // status in the snapshot — canceled/rejected/expired must not be left to
-  // wait forever for a fill that will never come.
-  await deliverWake(sub, { reason: "fired", snapshot: orderSnapshot(order) });
+  orderFilledSubs.set(orderId, sub);
+  const stream = ensureTradingStream();
+  await stream.whenAuthenticated();
 }
 
-function armOrderPoll(sub: Subscription): void {
-  const timer = setInterval(() => void pollOrderOnce(sub), ORDER_POLL_INTERVAL_MS);
-  orderPolls.set(sub.id, timer);
-  // Check immediately too — a market order can fill in under 3s, and there's
-  // no reason to make the agent wait out a full poll interval to find out.
-  void pollOrderOnce(sub);
-}
-
-function disarmOrderPoll(sub: Subscription): void {
-  const timer = orderPolls.get(sub.id);
-  if (timer) clearInterval(timer);
-  orderPolls.delete(sub.id);
+function disarmOrderFilled(sub: Subscription): void {
+  if (!orderFilledSubs.delete(sub.resource)) return;
+  if (orderFilledSubs.size === 0 && tradingStream) {
+    tradingStream.disconnect();
+    tradingStream = null;
+  }
 }
 
 async function arm(sub: Subscription): Promise<void> {
   switch (sub.event) {
     case "order.filled":
-      armOrderPoll(sub);
+      await armOrderFilled(sub);
       return;
     case "price.crossesBelow":
     case "price.crossesAbove":
@@ -170,11 +231,11 @@ async function arm(sub: Subscription): Promise<void> {
 async function disarm(sub: Subscription): Promise<void> {
   switch (sub.event) {
     case "order.filled":
-      disarmOrderPoll(sub);
+      disarmOrderFilled(sub);
       return;
     case "price.crossesBelow":
     case "price.crossesAbove":
-      await disarmPriceCross(sub);
+      disarmPriceCross(sub);
       return;
     default:
       throw new Error(`alpaca provider does not support event: ${sub.event}`);

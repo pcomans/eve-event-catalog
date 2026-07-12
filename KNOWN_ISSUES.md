@@ -105,7 +105,31 @@ parameter properties (`constructor(private readonly x: T) {}`) — any test that
 imports a file using one fails, and the failure looks like a broken test, not a syntax
 limitation. Write explicit field declarations + constructor assignment instead.
 
-## 10. Assorted
+## 10. `@alpacahq/alpaca-trade-api` is pinned to a pre-1.0 alpha, by explicit decision
+
+Pinned to `4.0.0-alpha.3` (2026-07-12), exact version, no `^`. This is a deliberate call, not an
+oversight:
+
+- The stable `3.x` line is aging and pulls in CVE-bearing transitive dependencies; `4.x` is
+  Alpaca's actively-developed ground-up TypeScript rewrite (native `fetch`, typed errors,
+  built-in retry/rate-limiting, ergonomic order builders, unified `trading`/`marketData`
+  namespaces) — see [PR #295](https://github.com/alpacahq/alpaca-trade-api-js/pull/295).
+  Published 5 days before this decision; the wider PR/alpha effort is ~11 days old.
+- The alpha is **absent from Alpaca's docs site** as of this date — the README on the `ts-alpha`
+  branch is the only canonical reference; the published docs site still describes `3.x`.
+- **Root-export surprise**: most of the SDK's own README examples import types (`Order`,
+  `StockDataStream`, `TradeUpdate`, `toStockTrade`, `STATE`, ...) as if they were top-level
+  exports. They are not — `dist/index.d.ts` only re-exports the common-case surface (the `Alpaca`
+  client, error classes, chart helpers). Everything else lives under namespace exports:
+  `trading.Order`, `streaming.{StockDataStream,TradingStream,StreamTrade,TradeUpdate,STATE}`,
+  `marketDataShapes.toStockTrade`. `tsc` catches the mismatch immediately (`has no exported
+  member`) — if this happens, check the namespace, not the package version.
+- A [migration codemod](https://github.com/alpacahq/alpaca-trade-api-js/blob/ts-alpha/codemods/alpaca-v3-to-v4.js)
+  exists for `3.x -> 4.x` when the stable release ships — revisit this pin then. Until stable,
+  breaking changes between alpha patch versions are possible; re-verify `pnpm test` +
+  `pnpm typecheck` after any alpha version bump.
+
+## 11. Assorted
 
 - The dev server listens on port **2000**, not 3000 as eve's own docs curl examples suggest.
 - Local durable workflow state lives in `.workflow-data/` (gitignored). If sessions look stuck

@@ -13,9 +13,10 @@
     "dev": "eve dev --no-ui",
     "start": "eve start",
     "typecheck": "tsc",
-    "test": "node --env-file-if-exists=.env.local --test catalog/*.test.ts catalog/providers/*.test.ts"
+    "test": "node --env-file-if-exists=.env.local --test catalog/*.test.ts catalog/providers/*.test.ts tests/**/*.test.ts"
   },
   "dependencies": {
+    "@alpacahq/alpaca-trade-api": "4.0.0-alpha.3",
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/api-logs": "0.220.0",
     "@opentelemetry/exporter-trace-otlp-proto": "0.220.0",

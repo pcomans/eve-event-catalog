@@ -1,27 +1,27 @@
-// Thin typed client over Alpaca's paper trading + market data APIs. Native
-// fetch and Node's built-in WebSocket only — no Alpaca SDK, per the hard
-// rule that every infra component maps to a Vercel primitive (an SDK
-// wrapping the same two REST bases plus a websocket buys us nothing here).
+// Thin seam over Alpaca's official SDK (v4 alpha — pre-1.0, pinned
+// deliberately; see KNOWN_ISSUES.md for the rationale). catalog/providers/
+// alpaca.ts and agent/tools/*.ts both import through this one file rather
+// than touching the SDK directly, so every call this codebase makes to
+// Alpaca is visible in one place, and the shapes exported below are the
+// stable seam: they don't change even if the implementation underneath does
+// (this file previously wrapped a hand-written fetch/WebSocket client).
+// The public root export only re-exports what's needed for the common case
+// (the Alpaca client itself, error classes, chart helpers, ...) — raw
+// generated types/mappers like `Order` and `toStockTrade` live under these
+// namespaces instead (verified against the package's actual dist/index.d.ts;
+// several of these are absent from the README's own top-level import examples).
+import { Alpaca, marketDataShapes, trading } from "@alpacahq/alpaca-trade-api";
 
-const TRADING_BASE = "https://paper-api.alpaca.markets/v2";
-const DATA_BASE = "https://data.alpaca.markets/v2";
+type SdkOrder = trading.Order;
+const { toStockTrade } = marketDataShapes;
 
 export type DataFeed = "iex" | "test";
 
-function authHeaders(): Record<string, string> {
-  const keyId = process.env.ALPACA_API_KEY_ID;
-  const secretKey = process.env.ALPACA_API_SECRET_KEY;
-  if (!keyId || !secretKey) {
-    throw new Error("ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY are not set");
-  }
-  return { "APCA-API-KEY-ID": keyId, "APCA-API-SECRET-KEY": secretKey };
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, { ...init, headers: { ...authHeaders(), ...init?.headers } });
-  if (!res.ok) throw new Error(`alpaca ${init?.method ?? "GET"} ${url} -> ${res.status}: ${await res.text()}`);
-  return res.json() as Promise<T>;
-}
+export const alpacaClient = new Alpaca({
+  keyId: process.env.ALPACA_API_KEY_ID,
+  secret: process.env.ALPACA_API_SECRET_KEY,
+  paper: true,
+});
 
 export interface AlpacaAccount {
   id: string;
@@ -32,8 +32,16 @@ export interface AlpacaAccount {
   buying_power: string;
 }
 
-export function getAccount(): Promise<AlpacaAccount> {
-  return request(`${TRADING_BASE}/account`);
+export async function getAccount(): Promise<AlpacaAccount> {
+  const account = await alpacaClient.trading.account.getAccount();
+  return {
+    id: account.id,
+    status: account.status,
+    currency: account.currency!,
+    cash: account.cash!,
+    portfolio_value: account.portfolioValue!,
+    buying_power: account.buyingPower!,
+  };
 }
 
 export interface AlpacaPosition {
@@ -45,8 +53,16 @@ export interface AlpacaPosition {
   unrealized_pl: string;
 }
 
-export function getPositions(): Promise<AlpacaPosition[]> {
-  return request(`${TRADING_BASE}/positions`);
+export async function getPositions(): Promise<AlpacaPosition[]> {
+  const positions = await alpacaClient.trading.positions.getAllOpenPositions();
+  return positions.map((position) => ({
+    symbol: position.symbol,
+    side: position.side,
+    qty: position.qty,
+    avg_entry_price: position.avgEntryPrice,
+    market_value: position.marketValue,
+    unrealized_pl: position.unrealizedPl,
+  }));
 }
 
 export interface SubmitOrderInput {
@@ -70,12 +86,42 @@ export interface AlpacaOrder {
   filled_at: string | null;
 }
 
-export function submitOrder(input: SubmitOrderInput): Promise<AlpacaOrder> {
-  return request(`${TRADING_BASE}/orders`, { method: "POST", body: JSON.stringify(input) });
+/**
+ * Normalizes the SDK's camelCase `Order` — from a REST response or from a
+ * pushed `trade_updates` event, both are the same shape — onto this seam's
+ * stable snake_case-ish fields, so callers get one consistent shape
+ * regardless of which path produced it.
+ */
+export function normalizeOrder(order: SdkOrder): AlpacaOrder {
+  return {
+    id: order.id!,
+    symbol: order.symbol!,
+    side: order.side!,
+    status: order.status!,
+    notional: order.notional ?? null,
+    qty: order.qty ?? null,
+    filled_qty: order.filledQty!,
+    filled_avg_price: order.filledAvgPrice ?? null,
+    submitted_at: order.submittedAt!.toISOString(),
+    filled_at: order.filledAt ? order.filledAt.toISOString() : null,
+  };
 }
 
-export function getOrder(orderId: string): Promise<AlpacaOrder> {
-  return request(`${TRADING_BASE}/orders/${orderId}`);
+export async function submitOrder(input: SubmitOrderInput): Promise<AlpacaOrder> {
+  // input.type/time_in_force describe this seam's (deliberately narrow)
+  // input contract for callers, not passed through literally — the ergonomic
+  // builder only ever places market orders and defaults timeInForce to "day".
+  const order = await alpacaClient.trading.orders.market({
+    symbol: input.symbol,
+    side: input.side,
+    notional: input.notional,
+  });
+  return normalizeOrder(order);
+}
+
+export async function getOrder(orderId: string): Promise<AlpacaOrder> {
+  const order = await alpacaClient.trading.orders.getOrderByOrderID({ orderId });
+  return normalizeOrder(order);
 }
 
 export interface LatestTrade {
@@ -83,129 +129,32 @@ export interface LatestTrade {
   timestamp: string;
 }
 
-/**
- * GET /stocks/{symbol}/trades/latest. Only meaningful on the `iex` feed —
- * verified empirically that the test feed's synthetic FAKEPACA symbol has
- * no REST trade history at all (`feed=test` is rejected as "invalid feed"
- * for this endpoint, and `feed=iex` returns "no trade found for FAKEPACA").
- * Callers on the test feed must seed the previous price from the first
- * stream tick instead (see alpaca.ts).
- */
+// Last trade observed on the "test" feed's shared stream (populated by
+// catalog/providers/alpaca.ts's tick handler) — REST trades/latest has no
+// data for FAKEPACA at all, verified empirically against the live API:
+// feed=test is rejected as "invalid feed" for this endpoint, and feed=iex
+// returns "no trade found for FAKEPACA". This lets getLatestTrade still
+// answer truthfully under ALPACA_DATA_FEED=test once at least one tick has
+// arrived, instead of always failing.
+let lastTestFeedTrade: LatestTrade | null = null;
+
+export function recordTestFeedTrade(trade: LatestTrade): void {
+  lastTestFeedTrade = trade;
+}
+
 export async function getLatestTrade(symbol: string, feed: DataFeed): Promise<LatestTrade> {
-  const json = await request<{ trade: { p: number; t: string } }>(
-    `${DATA_BASE}/stocks/${symbol}/trades/latest?feed=${feed}`,
-  );
-  return { price: json.trade.p, timestamp: json.trade.t };
-}
-
-export interface Trade {
-  symbol: string;
-  price: number;
-  timestamp: string;
-}
-
-type TradeHandler = (trade: Trade) => void;
-
-function log(line: string) {
-  console.log(`[alpaca-stream] ${line}`);
-}
-
-/**
- * One websocket connection to Alpaca's market data stream, shared across
- * every price subscription — the free plan allows exactly one. Lazily
- * connects on the first `subscribe()` call and stays open for the life of
- * the process; symbols are added/removed as subscriptions come and go via
- * `subscribe`/`unsubscribe`, not by opening new connections.
- */
-export class AlpacaStream {
-  // Not a constructor parameter property: Node's native --experimental-strip-types
-  // (which `node --test` uses, with no transform-types fallback available in
-  // this Node version) can't parse that syntax, which would silently block
-  // any node:test file that transitively imports this module. eve's own
-  // bundler tolerates it, but plain `node --test` is how catalog/*.test.ts
-  // and agent/tools/*.test.ts run.
-  private readonly feed: DataFeed;
-  private ws: WebSocket | null = null;
-  private ready: Promise<void> | null = null;
-  private readonly subscribedSymbols = new Set<string>();
-  private readonly handlers = new Set<TradeHandler>();
-
-  constructor(feed: DataFeed) {
-    this.feed = feed;
-  }
-
-  onTrade(handler: TradeHandler): void {
-    this.handlers.add(handler);
-  }
-
-  /** Opens the connection and completes the connect -> auth handshake. Idempotent. */
-  private connect(): Promise<void> {
-    if (this.ready) return this.ready;
-
-    this.ready = new Promise((resolve, reject) => {
-      const url = `wss://stream.data.alpaca.markets/v2/${this.feed}`;
-      const ws = new WebSocket(url);
-      this.ws = ws;
-
-      ws.addEventListener("open", () => log(`connect feed=${this.feed}`));
-
-      ws.addEventListener("message", (event) => {
-        const messages = JSON.parse(event.data.toString()) as Array<Record<string, unknown>>;
-        for (const msg of messages) this.handleMessage(msg, resolve);
-      });
-
-      ws.addEventListener("error", () => {
-        log(`error feed=${this.feed}`);
-        reject(new Error(`alpaca stream error (feed=${this.feed})`));
-      });
-
-      ws.addEventListener("close", (event) => {
-        log(`closed feed=${this.feed} code=${event.code}`);
-      });
-    });
-
-    return this.ready;
-  }
-
-  private handleMessage(msg: Record<string, unknown>, onAuthenticated: () => void): void {
-    if (msg.T === "success" && msg.msg === "connected") {
-      this.ws!.send(JSON.stringify({ action: "auth", key: authHeaders()["APCA-API-KEY-ID"], secret: authHeaders()["APCA-API-SECRET-KEY"] }));
-      return;
+  if (feed === "test") {
+    if (!lastTestFeedTrade) {
+      throw new Error(
+        `no test-feed trade observed yet for ${symbol} — the price stream hasn't ticked since this process started`,
+      );
     }
-    if (msg.T === "success" && msg.msg === "authenticated") {
-      log(`authenticated feed=${this.feed}`);
-      onAuthenticated();
-      return;
-    }
-    if (msg.T === "subscription") {
-      log(`subscribed feed=${this.feed} trades=${JSON.stringify(msg.trades)}`);
-      return;
-    }
-    if (msg.T === "t") {
-      const trade: Trade = { symbol: msg.S as string, price: msg.p as number, timestamp: msg.t as string };
-      for (const handler of this.handlers) handler(trade);
-      return;
-    }
-    if (msg.T === "error") {
-      log(`error feed=${this.feed} msg=${JSON.stringify(msg)}`);
-    }
+    return lastTestFeedTrade;
   }
 
-  /** Adds symbols to the shared subscription. Safe to call before the connection is up — queues behind the handshake. */
-  async subscribe(symbols: string[]): Promise<void> {
-    const news = symbols.filter((s) => !this.subscribedSymbols.has(s));
-    if (news.length === 0) return;
-    await this.connect();
-    news.forEach((s) => this.subscribedSymbols.add(s));
-    this.ws!.send(JSON.stringify({ action: "subscribe", trades: news }));
-  }
-
-  /** Drops symbols no subscription needs anymore. */
-  async unsubscribe(symbols: string[]): Promise<void> {
-    const owned = symbols.filter((s) => this.subscribedSymbols.has(s));
-    if (owned.length === 0) return;
-    await this.connect();
-    owned.forEach((s) => this.subscribedSymbols.delete(s));
-    this.ws!.send(JSON.stringify({ action: "unsubscribe", trades: owned }));
-  }
+  const resp = await alpacaClient.marketData.stocks.stockLatestTrades({ symbols: symbol, feed });
+  const raw = resp.trades?.[symbol];
+  if (!raw) throw new Error(`no latest trade for ${symbol} (feed=${feed})`);
+  const trade = toStockTrade(raw, symbol);
+  return { price: trade.price, timestamp: trade.timestamp.toISOString() };
 }
