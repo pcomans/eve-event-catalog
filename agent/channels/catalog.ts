@@ -3,10 +3,12 @@ import { defineChannel, GET, POST } from "eve/channels";
 import { getConversation, listSubscriptions, recordConversation } from "#catalog/registry.ts";
 import { armPendingForConversation, buildWakeEnvelope } from "#catalog/wake.ts";
 import { assertCatalogHonesty } from "#catalog/catalog.ts";
-// Side-effecting import: registers the alpaca provider (registerProvider("alpaca", ...))
-// at module load. ES module imports fully evaluate before this file's own
-// top-level code runs, so assertCatalogHonesty() below is guaranteed to see it.
+// Side-effecting imports: register the alpaca and edgar providers
+// (registerProvider(...)) at module load. ES module imports fully evaluate
+// before this file's own top-level code runs, so assertCatalogHonesty()
+// below is guaranteed to see both.
 import "#catalog/providers/alpaca.ts";
+import "#catalog/providers/edgar.ts";
 
 // The catalog channel owns the demo conversation: it starts each session on a
 // stable, caller-chosen `conversationId` and later "wakes" it by sending

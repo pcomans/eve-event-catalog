@@ -23,6 +23,24 @@ async function withActiveEventType<T>(provider: string, event: string, fn: () =>
   }
 }
 
+/**
+ * Mirror of withActiveEventType: every catalog.json entry is "active" as of
+ * task #8 (edgar.filing.new was the last one still "planned"), so exercising
+ * the "planned" code paths (subscribe's rejection, search's labeling) needs a
+ * temporarily-"planned" entry instead of a naturally-occurring one. Flips it
+ * for the duration of `fn` and always restores it.
+ */
+async function withPlannedEventType<T>(provider: string, event: string, fn: () => Promise<T> | T): Promise<T> {
+  const entry = EVENT_TYPES.find((e) => e.provider === provider && e.event === event)!;
+  const original = entry.status;
+  entry.status = "planned";
+  try {
+    return await fn();
+  } finally {
+    entry.status = original;
+  }
+}
+
 test("search ranks event types by keyword overlap and returns full provider metadata", () => {
   const results = search("realtime NVDA price drop below a threshold");
 
@@ -38,11 +56,13 @@ test("search ranks event types by keyword overlap and returns full provider meta
   assert.equal(results[0].status, "active");
 });
 
-test("search clearly labels a still-'planned' entry as such, not silently offered as usable", () => {
-  const results = search("SEC filing 8-K regulatory");
-  assert.ok(results.length > 0, "expected at least one match");
-  assert.equal(results[0].provider, "edgar");
-  assert.equal(results[0].status, "planned");
+test("search clearly labels a 'planned' entry as such, not silently offered as usable", async () => {
+  await withPlannedEventType("edgar", "filing.new", () => {
+    const results = search("SEC filing 8-K regulatory");
+    assert.ok(results.length > 0, "expected at least one match");
+    assert.equal(results[0].provider, "edgar");
+    assert.equal(results[0].status, "planned");
+  });
 });
 
 test("search returns an empty list for a query with no keyword overlap", () => {
@@ -72,21 +92,20 @@ test("subscribe rejects an unknown provider/event pair before touching the regis
 });
 
 test("subscribe rejects a 'planned' event type immediately, before validating params", async () => {
-  // edgar.filing.new remains "planned" until task #8; alpaca's three entries
-  // went "active" in task #4, so this is now the catalog's still-planned example.
-  const entry = EVENT_TYPES.find((e) => e.provider === "edgar" && e.event === "filing.new")!;
-  assert.equal(entry.status, "planned", "test premise: this entry has no provider registered yet");
-
-  await assert.rejects(
-    () =>
-      subscribe({
-        conversationId: "test:planned-rejection",
-        provider: "edgar",
-        event: "filing.new",
-        resource: "AAPL",
-        params: { formTypes: "this is not even valid — planned must be checked first" },
-      }),
-    /not implemented yet/,
+  // All of catalog.json is "active" as of task #8 — temporarily flip edgar
+  // back to "planned" to exercise this rejection path (withPlannedEventType).
+  await withPlannedEventType("edgar", "filing.new", () =>
+    assert.rejects(
+      () =>
+        subscribe({
+          conversationId: "test:planned-rejection",
+          provider: "edgar",
+          event: "filing.new",
+          resource: "AAPL",
+          params: { formTypes: "this is not even valid — planned must be checked first" },
+        }),
+      /not implemented yet/,
+    ),
   );
 });
 
@@ -123,28 +142,34 @@ test("subscribe accepts params that satisfy the event type's JSON Schema", async
   assert.deepEqual(sub.params, { threshold: 150 });
 });
 
+// Ordered before the "passes" test below, deliberately: it depends on
+// neither alpaca nor edgar having been registerProvider'd yet in this
+// process (the Map registerProvider writes to is shared module state across
+// every test in this file), which is only true before any test calls it.
+test("assertCatalogHonesty throws when an active event type has no registered provider", () => {
+  // Every catalog.json entry is genuinely "active" as of task #8, and none
+  // has been registered yet at this point in the file — edgar.filing.new is
+  // reused here (rather than flipping a status) since there's no
+  // still-"planned" entry left to point at.
+  assert.throws(() => assertCatalogHonesty(), /edgar\.filing\.new/);
+});
+
 test("assertCatalogHonesty passes once every active event type has a registered, supporting provider", () => {
-  // This test file runs isolated from catalog/providers/alpaca.ts (node:test
-  // runs each file separately), so it registers a stub matching alpaca's
-  // real supportedEvents rather than relying on that module's side effect.
-  // edgar.filing.new stays "planned" (task #8), which the check exempts.
+  // This test file runs isolated from catalog/providers/{alpaca,edgar}.ts
+  // (node:test runs each file separately), so it registers stubs matching
+  // their real supportedEvents rather than relying on those modules' import
+  // side effects.
   registerProvider("alpaca", {
     supportedEvents: ["price.crossesBelow", "price.crossesAbove", "order.filled"],
     arm: async () => {},
     disarm: async () => {},
   });
+  registerProvider("edgar", {
+    supportedEvents: ["filing.new"],
+    arm: async () => {},
+    disarm: async () => {},
+  });
   assert.doesNotThrow(() => assertCatalogHonesty());
-});
-
-test("assertCatalogHonesty throws when an active event type has no registered provider", () => {
-  const entry = EVENT_TYPES.find((e) => e.provider === "edgar" && e.event === "filing.new")!;
-  const original = entry.status;
-  entry.status = "active"; // simulate the file advertising something unimplemented
-  try {
-    assert.throws(() => assertCatalogHonesty(), /edgar\.filing\.new/);
-  } finally {
-    entry.status = original; // restore — this array is shared module state
-  }
 });
 
 test("assertCatalogHonesty is event-granular: a registered provider doesn't vouch for events outside its supportedEvents", () => {

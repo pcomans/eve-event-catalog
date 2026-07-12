@@ -74,7 +74,7 @@
     {
       "provider": "edgar",
       "event": "filing.new",
-      "status": "planned",
+      "status": "active",
       "description": "Fires when SEC EDGAR publishes a new filing for a company. Set `resource` to the ticker symbol (resolved to a CIK internally). Optionally set `params.formTypes` to filter to specific forms, e.g. [\"8-K\"].",
       "params": {
         "type": "object",
