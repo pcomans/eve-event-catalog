@@ -118,12 +118,21 @@ function log(line: string) {
  * `subscribe`/`unsubscribe`, not by opening new connections.
  */
 export class AlpacaStream {
+  // Not a constructor parameter property: Node's native --experimental-strip-types
+  // (which `node --test` uses, with no transform-types fallback available in
+  // this Node version) can't parse that syntax, which would silently block
+  // any node:test file that transitively imports this module. eve's own
+  // bundler tolerates it, but plain `node --test` is how catalog/*.test.ts
+  // and agent/tools/*.test.ts run.
+  private readonly feed: DataFeed;
   private ws: WebSocket | null = null;
   private ready: Promise<void> | null = null;
   private readonly subscribedSymbols = new Set<string>();
   private readonly handlers = new Set<TradeHandler>();
 
-  constructor(private readonly feed: DataFeed) {}
+  constructor(feed: DataFeed) {
+    this.feed = feed;
+  }
 
   onTrade(handler: TradeHandler): void {
     this.handlers.add(handler);

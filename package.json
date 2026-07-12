@@ -2,6 +2,7 @@
   "name": "event-catalogue",
   "version": "0.0.0",
   "type": "module",
+  "packageManager": "pnpm@10.32.1",
   "imports": {
     "#*": "./agent/*",
     "#evals/*": "./evals/*",
@@ -12,7 +13,7 @@
     "dev": "eve dev --no-ui",
     "start": "eve start",
     "typecheck": "tsc",
-    "test": "node --test catalog/*.test.ts"
+    "test": "node --env-file-if-exists=.env.local --test catalog/*.test.ts catalog/providers/*.test.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",

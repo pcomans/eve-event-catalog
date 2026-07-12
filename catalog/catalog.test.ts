@@ -34,7 +34,14 @@ test("search ranks event types by keyword overlap and returns full provider meta
   assert.ok(results[0].metadata.latency.length > 0);
   assert.ok(results[0].metadata.auth.length > 0);
   assert.ok(results[0].metadata.cost.length > 0);
-  // "planned" entries must be clearly labeled, not silently offered as usable.
+  // alpaca went "active" in task #4 — this result is genuinely usable now.
+  assert.equal(results[0].status, "active");
+});
+
+test("search clearly labels a still-'planned' entry as such, not silently offered as usable", () => {
+  const results = search("SEC filing 8-K regulatory");
+  assert.ok(results.length > 0, "expected at least one match");
+  assert.equal(results[0].provider, "edgar");
   assert.equal(results[0].status, "planned");
 });
 
@@ -65,17 +72,19 @@ test("subscribe rejects an unknown provider/event pair before touching the regis
 });
 
 test("subscribe rejects a 'planned' event type immediately, before validating params", async () => {
-  const entry = EVENT_TYPES.find((e) => e.provider === "alpaca" && e.event === "price.crossesBelow")!;
+  // edgar.filing.new remains "planned" until task #8; alpaca's three entries
+  // went "active" in task #4, so this is now the catalog's still-planned example.
+  const entry = EVENT_TYPES.find((e) => e.provider === "edgar" && e.event === "filing.new")!;
   assert.equal(entry.status, "planned", "test premise: this entry has no provider registered yet");
 
   await assert.rejects(
     () =>
       subscribe({
         conversationId: "test:planned-rejection",
-        provider: "alpaca",
-        event: "price.crossesBelow",
-        resource: "NVDA",
-        params: { threshold: "this is not even valid — planned must be checked first" },
+        provider: "edgar",
+        event: "filing.new",
+        resource: "AAPL",
+        params: { formTypes: "this is not even valid — planned must be checked first" },
       }),
     /not implemented yet/,
   );
@@ -114,10 +123,16 @@ test("subscribe accepts params that satisfy the event type's JSON Schema", async
   assert.deepEqual(sub.params, { threshold: 150 });
 });
 
-test("assertCatalogHonesty passes while every catalog.json entry is status: planned", () => {
-  // No providers are registered anywhere in this codebase yet (task #4 adds
-  // alpaca); every current entry is intentionally "planned", so the check
-  // must not throw.
+test("assertCatalogHonesty passes once every active event type has a registered, supporting provider", () => {
+  // This test file runs isolated from catalog/providers/alpaca.ts (node:test
+  // runs each file separately), so it registers a stub matching alpaca's
+  // real supportedEvents rather than relying on that module's side effect.
+  // edgar.filing.new stays "planned" (task #8), which the check exempts.
+  registerProvider("alpaca", {
+    supportedEvents: ["price.crossesBelow", "price.crossesAbove", "order.filled"],
+    arm: async () => {},
+    disarm: async () => {},
+  });
   assert.doesNotThrow(() => assertCatalogHonesty());
 });
 

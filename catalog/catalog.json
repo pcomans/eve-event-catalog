@@ -3,7 +3,7 @@
     {
       "provider": "alpaca",
       "event": "price.crossesBelow",
-      "status": "planned",
+      "status": "active",
       "description": "Fires once when a stock's live trade price crosses from at-or-above a threshold to strictly below it. Edge-triggered: if the price is already below the threshold when the subscription arms, it does not fire on that fact alone — it waits for an actual downward crossing. Set `resource` to the ticker symbol and `params.threshold` to the price level.",
       "params": {
         "type": "object",
@@ -29,7 +29,7 @@
     {
       "provider": "alpaca",
       "event": "price.crossesAbove",
-      "status": "planned",
+      "status": "active",
       "description": "Fires once when a stock's live trade price crosses from at-or-below a threshold to strictly above it. Edge-triggered, mirrors price.crossesBelow. Set `resource` to the ticker symbol and `params.threshold` to the price level.",
       "params": {
         "type": "object",
@@ -55,7 +55,7 @@
     {
       "provider": "alpaca",
       "event": "order.filled",
-      "status": "planned",
+      "status": "active",
       "description": "Fires once when a submitted paper order reaches filled status. Set `resource` to the Alpaca order id returned by submit_order.",
       "params": {
         "type": "object",
