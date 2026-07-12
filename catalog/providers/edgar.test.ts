@@ -204,6 +204,40 @@ test("an arm that resumes after the watch it was waiting on gets torn down lands
   assert.equal(watcher.getWatch("0000320193"), undefined);
 });
 
+test("a concurrent disarm landing on ANY microtask handoff during arm() — not just the first — never orphans the new subscriber on a dead watch", async () => {
+  // The previous test only exercised the FIRST handoff (disarm fired before
+  // arm() had even resumed from its await on the watch-creation promise).
+  // A second handoff existed after that: arm() awaited getOrCreateWatch(...)
+  // itself (one more microtask hop, since awaiting an async function call
+  // always yields once more regardless of what that function does
+  // internally) before inserting into watch.subscriptions — so a disarm
+  // landing in THAT gap, after the liveness recheck had already passed,
+  // still orphaned the subscriber. Rather than hand-count exactly how many
+  // microtask hops exist (a number that's an implementation detail liable to
+  // drift), this sweeps every hop count from 0 upward and asserts the
+  // invariant holds no matter which one the disarm lands on.
+  for (let ticks = 0; ticks < 6; ticks++) {
+    const watcher = createEdgarWatcher(fakeFetcher("Apple Inc.", []), 1_000_000, () => false);
+    const subA = makeSub("sub-a", "AAPL");
+    const subB = makeSub(`sub-b-${ticks}`, "AAPL");
+
+    await watcher.arm(subA, "0000320193", "AAPL");
+
+    const armB = watcher.arm(subB, "0000320193", "AAPL");
+    for (let i = 0; i < ticks; i++) await Promise.resolve();
+    watcher.disarm(subA);
+
+    await armB;
+
+    const info = watcher.getWatch("0000320193");
+    assert.ok(info, `subB must land on a live watch even when subA's disarm lands after ${ticks} microtask tick(s)`);
+    assert.equal(info?.subscriberCount, 1, `only subB should be watching (ticks=${ticks})`);
+
+    watcher.disarm(subB);
+    assert.equal(watcher.getWatch("0000320193"), undefined, `watch must fully tear down (ticks=${ticks})`);
+  }
+});
+
 test("createEdgarWatcher seeds a freshly-created watch using the arming subscription's armedAt — a filing accepted after it is excluded from the baseline", async () => {
   const filings = [filing("acc-new", "2026-07-12T05:01:00.000Z"), filing("acc-old", "2026-07-12T04:00:00.000Z")];
   const watcher = createEdgarWatcher(fakeFetcher("Apple Inc.", filings), 1_000_000, () => false);

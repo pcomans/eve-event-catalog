@@ -228,7 +228,24 @@ export function createEdgarWatcher(
     return watch;
   }
 
-  async function getOrCreateWatch(cik: string, ticker: string, armedAt: string): Promise<CikWatch> {
+  /**
+   * Resolves (creating if needed) the live watch for `cik` and inserts `sub`
+   * into it — as one operation, not two, and that's the whole point: the
+   * liveness re-check below and the `subscriptions.set()` that depends on it
+   * must happen in the same synchronous block, with NO `await` anywhere in
+   * between. A first version split them (this function returned the watch,
+   * the caller awaited that and *then* inserted) — awaiting an async
+   * function's returned promise yields to the microtask queue once more
+   * regardless of what that function did internally, so a concurrent,
+   * fully-synchronous disarm() could still tear the watch down in that
+   * second gap, after the recheck had already confirmed it was live. Once a
+   * subscription is actually inserted into `watch.subscriptions`, the watch
+   * is protected from teardown for as long as that entry exists (disarm()
+   * only tears down when the map is empty) — so returning only after the
+   * insert, with the check and insert adjacent, closes every such window,
+   * not just the first one a racing disarm could land in.
+   */
+  async function claimWatch(sub: Subscription, cik: string, ticker: string, armedAt: string): Promise<CikWatch> {
     let promise = watchCreation.get(cik);
     if (!promise) {
       promise = createWatch(cik, ticker, armedAt);
@@ -239,15 +256,10 @@ export function createEdgarWatcher(
       promise.catch(() => watchCreation.delete(cik));
     }
     const watch = await promise;
-    // Re-check after the await: even an already-resolved `promise` still
-    // yields to the microtask queue here, and a concurrent disarm() (fully
-    // synchronous — no await in it) can run in that gap and tear this exact
-    // watch down (last subscriber left: timer cleared, both maps deleted)
-    // before we resume. Landing a new subscriber on that dead watch would
-    // orphan it — a live subscription pointing at a stopped poll loop.
-    // Retrying re-claims (building a fresh watch, or joining a fresh
-    // concurrent claim) instead.
-    if (watches.get(cik) !== watch) return getOrCreateWatch(cik, ticker, armedAt);
+    // Synchronous from here to the insert: no `await` between the liveness
+    // check and claiming a spot in `watch.subscriptions`.
+    if (watches.get(cik) !== watch) return claimWatch(sub, cik, ticker, armedAt);
+    watch.subscriptions.set(sub.id, sub);
     return watch;
   }
 
@@ -292,13 +304,13 @@ export function createEdgarWatcher(
   }
 
   async function arm(sub: Subscription, cik: string, ticker: string): Promise<void> {
-    // Any failure inside getOrCreateWatch must not leave a dangling subCik
-    // entry behind for a sub about to be marked "failed" — arm failures
-    // don't get a disarm() call for free (same convention as alpaca.ts).
-    // Both writes below only happen once getOrCreateWatch has genuinely
-    // succeeded.
-    const watch = await getOrCreateWatch(cik, ticker, sub.armedAt ?? new Date().toISOString());
-    watch.subscriptions.set(sub.id, sub);
+    // Any failure inside claimWatch must not leave a dangling subCik entry
+    // behind for a sub about to be marked "failed" — arm failures don't get
+    // a disarm() call for free (same convention as alpaca.ts). subCik is set
+    // only once claimWatch has genuinely inserted `sub` into a live watch;
+    // by that point the watch can't be torn out from under it (see
+    // claimWatch's doc comment), so no further atomicity is needed here.
+    const watch = await claimWatch(sub, cik, ticker, sub.armedAt ?? new Date().toISOString());
     subCik.set(sub.id, cik);
     logCatalog("arm", sub, { cik, ticker, subscribers: watch.subscriptions.size });
   }
