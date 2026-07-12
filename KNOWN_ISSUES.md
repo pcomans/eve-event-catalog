@@ -98,7 +98,14 @@ both running dev servers this way).
 - Never run pnpm with `CI=true` to skip its confirmation prompts — the prompt you're bypassing
   may be "recreate node_modules?", which is destructive to every process using it.
 
-## 9. Assorted
+## 9. TS parameter properties break `node --test`
+
+Node's native type-stripping (used by `node --test` / `pnpm test`) cannot parse TypeScript
+parameter properties (`constructor(private readonly x: T) {}`) — any test that transitively
+imports a file using one fails, and the failure looks like a broken test, not a syntax
+limitation. Write explicit field declarations + constructor assignment instead.
+
+## 10. Assorted
 
 - The dev server listens on port **2000**, not 3000 as eve's own docs curl examples suggest.
 - Local durable workflow state lives in `.workflow-data/` (gitignored). If sessions look stuck
