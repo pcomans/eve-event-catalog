@@ -1,336 +1,326 @@
 # Event Catalog
 
-**Tool calls are how agents call the world; events are how the world calls back. The Event
-Catalog is where agents discover and subscribe to them.**
+> Give AI agents a simple way to say: “Wake me when this happens.”
 
-AI agents are excellent at reacting *now* and terrible at reacting *later*. This POC gives an
-[eve](https://eve.dev) agent the missing primitive: **"wake me when X happens."** The agent
-discovers event sources it knows nothing about, subscribes with typed predicates, suspends
-(durably, at zero compute), and is resumed by the catalog when the event fires — interrupts for
-AI agents. The vertical slice is agentic trading: Alpaca paper trading + SEC EDGAR filings.
+Tools let an agent act on the world now. Events let the world call the agent back later.
 
-The demo sentence the whole system exists for:
+That second direction is surprisingly hard. If an agent needs to wait for a stock price, an order
+update, or a new filing, someone usually has to build polling jobs, webhook handlers, queues, and
+state management for that one task.
 
-> *"Buy $100 of NVDA if it falls below $150 today."*
+Event Catalog turns waiting into a reusable agent capability. An agent can:
 
-The agent finds the right event source in the catalog, subscribes, parks, wakes on the price
-cross, re-checks reality, paper-trades autonomously within the stated mandate, parks again, and
-reports the fill — without a single polling loop in agent code and without a human in the loop.
+1. discover the events available to it;
+2. subscribe with a validated condition;
+3. end its turn and park without consuming compute; and
+4. resume the same conversation when the condition is met.
 
-**eve in two sentences** (enough to read the diagrams; the rest is at [eve.dev](https://eve.dev)):
-an eve *session* is a durable conversation — it can pause ("park") for hours at zero compute,
-survive restarts, and be resumed later by whoever holds its resume key (the *continuation
-token*). Everything below runs locally in dev, including the workflow engine — "durable" does
-not mean "in Vercel's cloud" here.
+This proof of concept runs on [eve](https://eve.dev). eve provides the durable agent session: it
+preserves the conversation while it is paused and resumes it later. The Event Catalog provides the
+layer that watches the outside world and knows when to wake it.
 
-## The big picture
+The demo scenario is agentic trading with Alpaca paper trading and SEC EDGAR. The prompt it is
+built around is:
+
+> Buy $100 of NVDA if it falls below $150 today.
+
+The agent waits for the price, checks that the condition is still true when it wakes, places a
+paper order, waits for the order outcome, and reports the result—without running a polling loop in
+the agent itself.
+
+## How it works
 
 ```mermaid
 flowchart LR
-    A["Agent
-    a durable conversation —
-    sleeps between events, at zero compute"]
-    C["Event Catalog
-    a JSON file of things worth waiting for
-    + the machinery that watches them"]
-    W["The world
-    markets · orders · SEC filings"]
-
-    A -->|"① what can I wait for?"| C
-    A -->|"② wake me when X happens"| C
-    C -->|"③ watches (streams, polls)"| W
-    C -->|"④ X happened — wake up"| A
+    U["User"] -->|"Buy when..."| A["Agent<br/>durable eve session"]
+    A -->|"1. Search and subscribe"| C["Event Catalog<br/>validated events + subscriptions"]
+    C -->|"2. Watch"| P["External services<br/>Alpaca · SEC EDGAR"]
+    P -->|"3. Condition met"| C
+    C -->|"4. Wake same conversation"| A
+    A -->|"5. Re-check and act"| P
+    A -->|"6. Report"| U
 ```
 
-That's the whole idea. The agent never polls, never holds a connection, never knows Alpaca or
-SEC exist — it asks the catalog what can be waited for, subscribes, and goes to sleep. The
-catalog does the watching and calls back. You talk to the agent with `POST /catalog/chat`
-(each `conversationId` is one ongoing conversation); it lives next to `/catalog/wake` because
-of an eve rule: only whoever *starts* a conversation holds the key to *resume* it — and the
-catalog must hold that key to wake sleeping agents.
+There are five main pieces:
 
-<details>
-<summary><b>Under the hood</b> — the full component map</summary>
+- **The agent** decides what it needs to wait for. It searches the catalog and subscribes through
+  tools instead of knowing how every external API works.
+- **`catalog/catalog.json`** is the menu of events. Each entry describes the event, its input
+  schema, provider characteristics, and what the agent should do after waking.
+- **The registry** stores subscriptions and conversation addresses in Upstash Redis.
+- **Providers** do the watching. Alpaca uses shared WebSocket connections; EDGAR uses one shared
+  polling loop per company because the SEC does not offer a push stream for filings.
+- **The wake path** resumes the existing eve session with the event data and catalog-authored
+  handling guidance.
 
-```mermaid
-flowchart TB
-    User(["User / curl"])
+This is not a replacement for a workflow engine. eve owns durable execution. The Event Catalog is
+the event-discovery and wake-up layer on top.
 
-    subgraph app["eve app — local dev server :2000"]
-        subgraph channel["conversation API (an eve 'channel' — holds the resume keys)"]
-            CHAT["POST /catalog/chat"]
-            WAKE["POST /catalog/wake"]
-            SUBS["GET /catalog/subscriptions"]
-        end
+A deeper technical tour — the full component map, the demo as a sequence diagram, and the
+subscription state machine — lives in [`docs/architecture.md`](docs/architecture.md).
 
-        subgraph agent["Trading agent — durable eve session"]
-            LLM["model turn"]
-            TOOLS["tools: search_events · subscribe_event ·<br/>get_latest_price · get_account · submit_order"]
-        end
+## One prompt, two wakes
 
-        subgraph catalog["Event Catalog (in-process library)"]
-            CJ[["catalog.json<br/>event types · JSON Schemas · onWake guidance"]]
-            REG["registry — subscription lifecycle"]
-            WK["wake — delivery · expiry timers ·<br/>guidance resolution"]
-            ALP["alpaca provider<br/>(push: 2 websockets)"]
-            EDG["edgar provider<br/>(poll: 30s per company, coalesced)"]
-        end
-    end
+For the trading demo, the conversation unfolds like this:
 
-    REDIS[("Upstash Redis")]
-    MDATA["Alpaca market data ws<br/>(IEX / FAKEPACA test)"]
-    TUPD["Alpaca trade_updates ws"]
-    AREST["Alpaca REST<br/>(paper trading · market data)"]
-    SEC["SEC EDGAR<br/>data.sec.gov"]
-    LS["LangSmith (OTel traces)"]
+1. The user asks to buy NVDA if it crosses below a price.
+2. The agent discovers Alpaca's `price.crossesBelow` event and creates a subscription.
+3. The turn ends. The eve session parks, and the catalog starts watching Alpaca's market stream.
+4. A trade crosses the threshold. The catalog wakes the same conversation.
+5. The agent fetches a fresh price and the paper account's buying power.
+6. If the condition still holds, it submits a $100 paper order and subscribes to the order result.
+7. Alpaca sends the terminal order update. The catalog wakes the conversation again.
+8. The agent reports whether the order filled, was canceled, was rejected, or expired.
 
-    User -->|"message"| CHAT
-    CHAT -->|"send(continuationToken)"| LLM
-    LLM --> TOOLS
-    TOOLS -->|"search / subscribe"| CJ
-    TOOLS --> REG
-    TOOLS -->|"quote · account · order"| AREST
-    REG <--> REDIS
-    ALP <-->|ticks| MDATA
-    ALP <-->|"order events"| TUPD
-    ALP -->|"seed at arm"| AREST
-    EDG -->|"poll + diff"| SEC
-    ALP -->|"predicate fired"| WK
-    EDG -->|"new filing"| WK
-    WK -->|"loopback POST"| WAKE
-    WAKE -->|"send() resumes parked session"| LLM
-    agent -.->|"spans"| LS
-    User -->|"inspect"| SUBS
-```
+Why fetch the price again in step 5? Because “the price crossed $150” does not mean “the price is
+still below $150.” A wake is evidence about something that happened; it is not guaranteed to be a
+current snapshot. The agent fetches current state again before it acts.
 
-</details>
+## Events available today
 
-Key moves, bottom to top:
+All active events are declared in [`catalog/catalog.json`](catalog/catalog.json). Their parameter
+schemas are enforced when the agent subscribes.
 
-- **The catalog is a JSON file.** `catalog/catalog.json` declares every event type: a
-  model-facing description, a JSON Schema for its parameters (enforced with Ajv, a JSON Schema
-  validator, at subscribe time — the schema the model reads during discovery is the one that
-  validates its input), honest provider metadata (freshness, latency, auth, cost, durability),
-  and `onWake` — prompt-shaped handling guidance delivered back to the agent when the event
-  fires. Entries whose provider isn't implemented yet are marked `"planned"`: search labels
-  them, subscribe rejects them, and a boot-time honesty check refuses to advertise any "active"
-  entry without a registered handler.
-- **Providers watch the world so agents don't.** Push when the source offers it (Alpaca: one
-  shared market-data websocket, one account-level `trade_updates` stream), coalesced polling when
-  it doesn't (EDGAR: one 30s poll loop per watched company — keyed by CIK, SEC's numeric company
-  id — regardless of subscriber count). REST is only for *seeding* state when a subscription
-  arms (see below), never for watching.
-- **The wake is the primitive.** Waking an agent is one `send()` on the conversation's
-  continuation token — same session, full memory, plus an envelope that makes time-passage
-  explicit. Delivery loops back over HTTP into the conversation API (rather than an in-process
-  call) because that component alone holds the resume keys — and it makes every
-  wake visible in the logs. The wake route is unauthenticated (local-only POC), which is exactly
-  why it *rejects* any caller-supplied guidance: the model-trusted instructions can only come
-  from `catalog.json`, resolved server-side. Event payloads are data, never instructions.
+| Provider | Event | Example | Delivery |
+|---|---|---|---|
+| Alpaca | `price.crossesBelow` | NVDA crosses from at or above $150 to below it | Shared market-data WebSocket |
+| Alpaca | `price.crossesAbove` | NVDA crosses from at or below $175 to above it | Shared market-data WebSocket |
+| Alpaca | `order.filled` | A paper order reaches any terminal state | Shared `trade_updates` WebSocket, with a one-time REST check when armed |
+| SEC EDGAR | `filing.new` | Apple publishes a new 8-K | One 30-second poll loop per company, shared by all subscribers |
 
-## The demo flow
+Price events are **edge-triggered**. When the subscription is armed, the provider records the
+current price as its baseline. If NVDA is already below $150 then, `price.crossesBelow` waits for a
+future downward crossing; it does not fire immediately because the price happens to be on that side
+of the threshold. Watching begins only after the agent's turn ends, so a crossing that happens
+during that turn is not observed.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as User
-    participant CH as conversation API
-    participant A as Agent (eve session)
-    participant C as Event Catalog
-    participant P as alpaca provider
-    participant X as Alpaca APIs
+Despite its name, `order.filled` wakes for every terminal outcome so the agent never waits forever
+on an order that was canceled, rejected, or expired. The wake payload tells the agent which outcome
+occurred.
 
-    U->>CH: "Buy $100 of NVDA if it falls below $150 today"
-    CH->>A: send(continuationToken) — turn starts
-    A->>C: search_events("price drops below")
-    C-->>A: price.crossesBelow + schema + metadata + onWake
-    A->>C: subscribe_event(NVDA, threshold 150, expires EOD)
-    C-->>A: subscription "pending"
-    A-->>U: "I'll wait." — turn ends
-    Note over A: session parks (durable, zero compute)
-    CH->>C: turn.completed → arm pending subs
-    C->>P: arm(sub)
-    P->>X: seed prev price (REST) + stream ticks (ws)
-    X-->>P: tick 149.87 — crossed below!
-    P->>C: deliverWake (claim → delivering)
-    C->>CH: POST /catalog/wake {subscriptionId, reason}
-    CH->>A: send() — wake message (envelope + onWake guidance)
-    Note over A: same session resumes
-    A->>X: get_latest_price + get_account (rehydrate, re-check predicate)
-    A->>X: submit_order (paper, notional $100 — autonomous, within the mandate)
-    A->>C: subscribe_event(order.filled, orderId)
-    A-->>U: "Order placed, waiting for fill." — parks again
-    X-->>P: trade_updates: filled
-    P->>C: deliverWake
-    C->>CH: POST /catalog/wake
-    CH->>A: send() — fill wake
-    A-->>U: "Bought $100 of NVDA @ 149.9 (trigger was 150)."
-```
+## Run it locally
 
-("Notional" = a dollar-amount order, not a share count. "Arming" a subscription = the provider
-actually starts watching for it; disarming stops the watching.)
+### Prerequisites
 
-Two details that look small and aren't:
+- Node.js 24 or newer
+- pnpm (the exact version is pinned in `package.json`)
+- the [Vercel CLI](https://vercel.com/docs/cli), authenticated to a Vercel account
+- an [Alpaca](https://alpaca.markets) **paper trading** account
+- optional: `jq` for formatting JSON responses in the terminal
+- optional: a [LangSmith](https://smith.langchain.com) account for traces
 
-- **Arm-on-turn-complete** (step 9): subscriptions stay `pending` while the agent's turn is still
-  running and arm only after it ends — otherwise a fast tick could try to wake a session that
-  hasn't parked yet. The honest flip side: the world isn't watched until arming, so a price that
-  crosses *and comes back* during those few in-turn seconds is never seen — the baseline
-  ("seeded prev") is the price at arm time.
-- **Rehydrate + re-check** (step 15): "price crossed 150" is not "price is still 150" — a
-  time-of-check-to-time-of-use (TOCTOU) gap. The wake's `onWake` guidance tells the agent its
-  snapshot is stale by definition; it re-fetches reality before acting, and declines to trade if
-  the condition no longer holds — that judgment is the agent's own; there is no human in the
-  loop (a deliberate full-autonomy choice; see Honest boundaries).
+The project uses Vercel AI Gateway for model access and Upstash Redis from the Vercel Marketplace
+for the subscription registry.
 
-## Subscription lifecycle
+### 1. Install and connect the project
 
-```mermaid
-stateDiagram-v2
-    [*] --> pending: subscribe_event (Ajv-validated,<br/>planned entries rejected)
-    pending --> armed: turn.completed —<br/>provider.arm + expiry timer<br/>(never mid-turn: closes the race)
-    pending --> failed: unknown provider<br/>(rejected before arming)
-    armed --> failed: arm error — auth, seed<br/>(lastError recorded)
-    armed --> delivering: predicate fires or expiry —<br/>synchronous claim, one winner
-    delivering --> fired: wake delivered,<br/>same session id verified
-    delivering --> expired: expiry wake delivered
-    delivering --> failed: delivery failed<br/>(session mismatch / HTTP error)
-    fired --> [*]: provider.disarm
-    expired --> [*]: provider.disarm
-    failed --> [*]: provider.disarm
-
-    note right of delivering
-        one-shot semantics:
-        every terminal state disarms
-        the provider watcher
-    end note
-```
-
-(Once armed, transient provider trouble — an EDGAR poll error, a websocket hiccup — logs loudly
-and keeps watching; it does not fail the subscription.)
-
-Every transition is visible at `GET /catalog/subscriptions` (status, timestamps, `lastError`) —
-the lifecycle *is* the observability model. Wakes are effectively-once: at-least-once delivery
-plus a synchronous in-process claim and idempotent resume, with a session-id check that detects
-(loudly) if eve's delivery fallback ever mints a fresh session instead of resuming the right one.
-Multiple wakes aimed at one session (say, two subscriptions firing together) arrive as
-sequential turns — eve buffers deliveries to a busy session.
-
-## What the catalog offers today
-
-"Edge-triggered" below means the price must actually *cross* the threshold — the provider seeds a
-baseline price when the subscription arms and fires only on a genuine crossing, never because the
-price already sat past the threshold.
-
-| provider | event | how it watches | freshness | auth | cost |
-|---|---|---|---|---|---|
-| alpaca | `price.crossesBelow` | shared websocket, edge-triggered vs seeded baseline | real-time (IEX) | paper keys | free |
-| alpaca | `price.crossesAbove` | same | real-time | paper keys | free |
-| alpaca | `order.filled` | `trade_updates` push, REST seed at arm; wakes on **any** terminal status | real-time (sub-second push) | paper keys | free |
-| edgar | `filing.new` | 30s poll per company (CIK), subscribers coalesced, accession diff | minutes | none (User-Agent required) | free |
-
-A subscription whose condition never triggers simply expires — and the agent tells you the
-condition never *triggered* while it watched (which is not a claim about where the price was).
-
-## Running it
-
-Prereqs: Node ≥ 24 and pnpm (exact version pinned via `packageManager`), a
-[Vercel](https://vercel.com) account, an [Alpaca](https://alpaca.markets) **paper** account, and
-optionally a [LangSmith](https://smith.langchain.com) key — tracing is a silent no-op without
-one; the agent runs fine.
-
-First-time setup from a fresh clone:
+From the repository root:
 
 ```bash
 pnpm install
-vercel link                    # creates/links YOUR Vercel project (model auth rides on it)
-vercel integration add upstash/upstash-kv   # provisions the Redis that backs the registry
-vercel env add <NAME> development           # once per var in .env.example (Alpaca keys, etc.)
-vercel env pull .env.local --yes            # writes .env.local, incl. a VERCEL_OIDC_TOKEN
+vercel link
+vercel integration add upstash/upstash-kv
 ```
 
-Secrets live in *your* Vercel project's env store, not in local files: `vercel env pull`
-**overwrites** `.env.local` wholesale, so anything added only locally is lost on the next pull.
-The `VERCEL_OIDC_TOKEN` (model auth via Vercel's AI Gateway — no provider API key needed) expires
-after ~12h: re-pull before a session, and only while the dev server is **down** — any
-`.env.local` write hot-reloads the server and drops in-process state (`KNOWN_ISSUES.md` #2).
+`vercel link` connects the local checkout to your Vercel project. The integration command creates
+the Redis store used by the catalog. It may also generate Upstash reference-skill files under
+`agent/`; check `git status` before committing and see
+[`KNOWN_ISSUES.md` issue 5](KNOWN_ISSUES.md#5-vercel-integration-add-installs-agent-skills-as-a-side-effect)
+for context.
+
+### 2. Add environment variables
+
+Add these values to the Vercel project's **development** environment:
 
 ```bash
-pnpm dev          # eve dev server on port 2000
-pnpm test         # 86 node:test cases (needs the Redis creds in .env.local)
-pnpm typecheck
+vercel env add ALPACA_API_KEY_ID development
+vercel env add ALPACA_API_SECRET_KEY development
+vercel env add EDGAR_USER_AGENT development
 ```
 
-Talk to the agent:
+Use Alpaca paper credentials. `EDGAR_USER_AGENT` should identify you in the format required by the
+SEC, for example `Your Name you@example.com`.
+
+LangSmith is optional. To enable it, also add `LANGSMITH_API_KEY` and
+`LANGSMITH_TRACING=true`; `LANGSMITH_PROJECT` selects a project when you do not want the default.
+See [`.env.example`](.env.example) for every supported setting.
+
+Pull the project environment into the local checkout:
 
 ```bash
-# start a conversation (returns a sessionId; replace the price!)
-curl -s -X POST localhost:2000/catalog/chat -H 'content-type: application/json' \
+vercel env pull .env.local --yes
+```
+
+This command also supplies `VERCEL_OIDC_TOKEN`, the short-lived credential AI Gateway uses locally.
+It expires after about 12 hours, so pull again before a long test or demo session.
+
+> **Stop the dev server before pulling.** `vercel env pull` overwrites `.env.local`, and an env-file
+> change causes eve to reload. A reload drops the catalog's in-process watchers. Keep source-of-truth
+> values in Vercel rather than adding local-only values to `.env.local`.
+
+### 3. Start the agent
+
+```bash
+pnpm dev
+```
+
+The server listens on port **2000**. In another terminal, check that it is healthy:
+
+```bash
+curl -sS localhost:2000/eve/v1/health
+```
+
+### 4. Start a conversation
+
+Before you send the demo prompt:
+
+- Run it during US market hours if you want to see a real price crossing and fill. The subscription
+  waits for a **future** downward crossing; it does not fire just because the price is already below
+  the threshold.
+- This prompt authorizes the agent to submit a $100 Alpaca paper order without asking for another
+  confirmation. The code cannot place a real-money trade.
+
+Find NVDA's latest price in the Alpaca paper dashboard or another live market-data source. Choose a
+threshold slightly below it, then replace `175` in this command:
+
+```bash
+curl -sS -X POST localhost:2000/catalog/chat \
+  -H 'content-type: application/json' \
   -d '{"conversationId":"demo-1","message":"Buy $100 of NVDA if it falls below $175 today."}'
-
-# watch the agent live
-curl -N localhost:2000/catalog/sessions/<sessionId>/stream
-
-# follow-ups are plain replies on the same conversation (same conversationId = same session)
-curl -s -X POST localhost:2000/catalog/chat -H 'content-type: application/json' \
-  -d '{"conversationId":"demo-1","message":"What are you waiting on right now?"}'
-
-# inspect every subscription's lifecycle
-curl -s localhost:2000/catalog/subscriptions | jq .
 ```
 
-First run: expect `{"ok":true,...}` from `curl localhost:2000/eve/v1/health`, a `sessionId` in
-the chat response, and NDJSON lifecycle events on the stream — `docs/acceptance-tests.md` AT-1
-and AT-2 spell out exactly what success looks like, step by step; AT-3 … AT-9 script everything
-else. If something misbehaves, read `KNOWN_ISSUES.md` before debugging — it's probably in there.
+The response includes a `sessionId`. Use it to stream the conversation as newline-delimited JSON:
 
-Demo guidance: run during US market hours (9:30–16:00 ET); pick a threshold slightly **below**
-the current price (edge-triggered — it has to cross downward). Off-hours, `ALPACA_DATA_FEED=test`
-(restart required) streams Alpaca's 24/7 synthetic ticker `FAKEPACA` through the same pipeline —
-useful for watching connect/seed/arm and tick flow, but note its price prints flat in practice,
-so *crossings* won't fire on it; expiry wakes and EDGAR wakes work any time.
+```bash
+SESSION_ID='paste-session-id-here'
+curl -sS -N "localhost:2000/catalog/sessions/$SESSION_ID/stream"
+```
+
+You can inspect all subscriptions and their current state at any time:
+
+```bash
+curl -sS localhost:2000/catalog/subscriptions | jq .
+```
+
+If `jq` is not installed, omit `| jq .` to see the unformatted JSON.
+
+A follow-up uses the same `conversationId`, which continues the same session:
+
+```bash
+curl -sS -X POST localhost:2000/catalog/chat \
+  -H 'content-type: application/json' \
+  -d '{"conversationId":"demo-1","message":"What are you waiting for right now?"}'
+```
+
+### Market-hours note
+
+The live IEX stream sends trades during US market hours, 9:30 a.m.–4:00 p.m. Eastern, Monday through
+Friday. A full price-crossing demo needs to run during that window. Pick a threshold slightly below
+the current price so the stream can observe a real downward crossing.
+
+For off-hours development, set `ALPACA_DATA_FEED=test` in Vercel, pull the env with the server
+stopped, and restart. This uses Alpaca's 24/7 synthetic `FAKEPACA` feed. It exercises the same
+connection and subscription path when you subscribe to the `FAKEPACA` symbol, but its price is
+often flat, so do not rely on it for a complete crossing-and-trade demo. Expiry and EDGAR wakes
+work at any time.
+
+Manual milestone checklists and demo scenarios live in
+[`docs/acceptance-tests.md`](docs/acceptance-tests.md).
 
 <!-- TODO after the supervised live demo (task 7): paste the two real AT-7 run transcripts here. -->
 
-## Observability
+## Design choices that matter
 
-- **LangSmith** (optional): every turn exports OTel spans (model calls, tool calls, full
-  inputs/outputs) to the project in `$LANGSMITH_PROJECT`. Requires `LANGSMITH_TRACING=true`
-  (silent no-op without it — see KNOWN_ISSUES #6).
-- **eve Agent Runs**: sessions/turns/tool calls in the Vercel dashboard, no setup.
-- **Catalog logs**: one structured line per action (`[catalog] …`, `[alpaca] …`, `[edgar] …`),
-  always carrying conversation + subscription ids. The console tells the whole story.
+### The catalog is executable documentation
 
-## Honest boundaries
+The model reads the same JSON Schema that Ajv, a JSON Schema validator, enforces at subscription
+time. An event marked `active` must have a registered provider, or the app refuses to boot.
+Unimplemented ideas stay marked `planned`: discovery labels them as unavailable, and subscription
+rejects them.
 
-This is a local-first POC, and says so:
+### Providers watch once and route many times
 
-- eve **sessions** are durable (they survive restarts — that's the workflow engine). The
-  catalog's **watchers** (websockets, poll loops, expiry timers) are in-process: a dev-server
-  restart keeps subscriptions in Redis but drops the watching; re-subscribe. Arm failures are
-  visible in `GET /catalog/subscriptions` (status `failed` + `lastError`), not pushed anywhere.
-- The agent trades **fully autonomously** — no human approval gate (a deliberate choice,
-  2026-07-12). Safety is capability-bounded instead: trading is hard-coded to Alpaca's **paper**
-  host; notional, buy-side, market/day orders only; the agent's instructions cap it at the
-  user's stated amount and require the post-wake re-check. There is no code path to real money.
-  (eve's approval gate is one line to restore — `approval: always()` on the tool — or a policy
-  function for bounded autonomy, e.g. auto-approve only within the mandate.)
-- Only conversations started through `/catalog/chat` are wakeable (the resume key stays with
-  whoever starts a conversation — an eve rule). Wiring another surface — Slack, a web UI —
-  would need cross-surface wakes; out of scope here.
-- At production scale, one seam changes: `deliverWake` becomes a publish to a durable topic
-  (Vercel Queues) — fired events are low-volume and must-not-lose, while raw ticks stay filtered
-  at the provider edge. The claim/idempotency semantics were built for at-least-once delivery
-  from day one. Cross-agent dedup, multi-region, and true webhook providers live in the PRD
-  appendix, not in this code.
+Polling never scales with the number of subscriptions. Alpaca offers push streams, so the provider
+shares one market-data connection and one account-level order-update connection. EDGAR requires
+polling, so every subscriber for the same company shares one loop keyed by that company's CIK
+(the SEC's numeric company identifier).
 
-## Map of the repo
+### Subscriptions arm after the turn ends
 
-| path | what |
+A new subscription starts as `pending` and becomes `armed` only after the agent's turn completes.
+That prevents a fast event from trying to wake a conversation before it has parked.
+
+The successful lifecycle is:
+
+```text
+pending → armed → delivering → fired | expired
+```
+
+A subscription can instead move to `failed` while arming or delivering. Every subscription state
+and terminal `lastError` is available through `GET /catalog/subscriptions`; transient WebSocket or
+EDGAR polling errors stay in the server logs while the provider keeps watching.
+
+### Event data cannot become trusted instructions
+
+Provider payloads are external data. Wake guidance is trusted instruction text owned by
+`catalog.json`. The wake route rejects caller-supplied guidance and resolves it on the server from
+the subscription's validated provider and event. A market tick or filing can inform the agent, but
+it cannot tell the agent what instructions to follow.
+
+## What is durable in this POC?
+
+This repository is a local-first proof of concept. Its boundary is deliberate:
+
+| Layer | Stored where | After a dev-server restart |
+|---|---|---|
+| eve conversation | eve's durable local workflow state | Resumable |
+| Subscription and conversation records | Upstash Redis | Preserved |
+| WebSockets, poll loops, and expiry timers | In the Node.js process | Lost; create a fresh subscription |
+
+Other current boundaries:
+
+- Trading is hard-coded to Alpaca's paper host. The agent can only place buy-only market orders for
+  a fixed dollar amount, valid for the trading day. There is no real-money endpoint in this
+  repository.
+- The trading demo is fully autonomous within those bounds; it has no human approval step.
+- `/catalog/wake` is unauthenticated and intended only for this local POC. Someone who knows a live
+  subscription ID can trigger an early or fake wake and supply its data and timestamps. They cannot
+  inject trusted catalog guidance, but the endpoint is not production-hardened.
+- Delivery claims are single-process. A production, multi-instance version would move fired events
+  through a durable transport such as Vercel Queues and use cross-instance deduplication.
+- Only conversations started through `/catalog/chat` can be woken. Other interfaces would need to
+  hand the catalog their conversations' resume keys (eve's continuation tokens).
+
+See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) before changing eve channel code or troubleshooting a
+demo. It records the sharp edges found while building against eve 0.22.5 beta.
+
+## Verification and observability
+
+Run the automated checks with:
+
+```bash
+pnpm typecheck
+pnpm test
+```
+
+`pnpm test` uses Node's built-in test runner and needs the Redis credentials in `.env.local`.
+
+While the app runs, you can follow it at three levels:
+
+- **Catalog logs** show each subscription, provider action, state transition, and error in the
+  terminal.
+- **The session stream** shows the conversation's turns and tool events as newline-delimited JSON.
+- **LangSmith** optionally records model and tool spans when tracing is configured.
+
+## Repository guide
+
+| Path | Purpose |
 |---|---|
-| `docs/prd-draft.md` | the original PRD (historical — kept as written; where the implementation deliberately deviates, e.g. full autonomy instead of trade approvals, this README's Honest boundaries section is the record) |
-| `docs/acceptance-tests.md` | manual test scripts per milestone (AT-1 … AT-9) |
-| `AGENTS.md` | project rules (north star, Vercel-primitives-only, catalog honesty, TDD) |
-| `KNOWN_ISSUES.md` | every sharp edge found building on eve 0.22.5 beta — read before touching channel code |
-| `agent/` | the eve agent: a 19-line prompt, 5 tools, the conversation/wake API, OTel |
-| `catalog/` | the Event Catalog: `catalog.json`, registry, wake, providers |
+| [`agent/`](agent/) | eve agent instructions, tools, custom conversation channel, and tracing |
+| [`catalog/catalog.json`](catalog/catalog.json) | Declarative event registry and wake guidance |
+| [`catalog/registry.ts`](catalog/registry.ts) | Subscription state and conversation mapping in Redis |
+| [`catalog/wake.ts`](catalog/wake.ts) | Arming, expiry, delivery, and wake-envelope construction |
+| [`catalog/providers/`](catalog/providers/) | Shared Alpaca streams and coalesced EDGAR polling |
+| [`docs/prd-draft.md`](docs/prd-draft.md) | Original product brief and future direction |
+| [`docs/acceptance-tests.md`](docs/acceptance-tests.md) | Manual acceptance tests, including the full trading demo |
+| [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) | eve and local-development pitfalls discovered in this POC |
