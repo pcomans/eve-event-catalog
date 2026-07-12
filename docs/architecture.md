@@ -390,7 +390,26 @@ four problems need real designs — they are correctness issues, not polish:
 Cost is not the blocker (an always-on Standard instance is roughly $15–20/month before active
 CPU; market-hours-only is less). The design work is.
 
-### Where the primitive already exists
+### Prior art — every layer exists somewhere, the stack exists nowhere
+
+The case for building this *into eve* is that competitors already ship the pieces:
+
+- **The suspend-until-event primitive**: Inngest's `step.waitForEvent()` is the mature version —
+  a durable function parks at zero compute until an event matching a CEL predicate expression
+  arrives, with a timeout (predicate + expiry, almost exactly our subscription shape). Same
+  family: Temporal signals, Restate awakeables, Step Functions task tokens.
+- **Agent + connector runtime in one primitive**: Cloudflare's Agents SDK — the `Agent` class
+  *is* a Durable Object (per-agent SQLite state, WebSockets, alarms, 2026's `keepAlive()` and
+  durable-execution fibers). On that stack there is no laptop-shaped watcher tier at all.
+- **The provider catalog**: Pipedream and Zapier operate thousands of managed event sources —
+  but aimed at workflows, not at waking suspended agents with typed predicates.
+
+No one has assembled the three into what this POC is: an agent-discoverable, schema-enforced
+catalog of events + predicate subscriptions + wakes delivered into an agent conversation. That
+assembly gap is the opportunity — and each layer existing elsewhere is the evidence the demand
+is real.
+
+### Where the connector primitive already exists
 
 Worth naming plainly: the missing connector runtime *does* exist elsewhere. **Cloudflare Durable
 Objects** are the closest match — identity-addressed single-threaded actors with durable
