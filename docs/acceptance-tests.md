@@ -68,11 +68,12 @@ never during one.
 6. [ ] `SUBS` now shows the subscription status `expired`, and the timer is gone (no further wakes; nothing fires later).
 7. [ ] Restart `pnpm dev`. `SUBS` is empty again (in-memory registry; documented behavior, not a bug).
 
-## AT-4 — Live price fire (market hours)
+## AT-4 — Price fire: test stream (any time) + live (market hours)
 
 **Covers:** task 4 (Alpaca provider, edge-triggered semantics).
 
 1. [ ] Edge-semantics script check (no market needed): run the provided script (`pnpm test:edge` or as documented in README) — synthetic ticks `150.2 → 149.8` against `crossesBelow 150` fire **exactly once**; ticks `149.8 → 149.5` (already below at seed) fire **zero** times.
+1a. [ ] **Test-stream pipeline check (works 24/7)**: with `ALPACA_DATA_FEED=test`, subscribe to a `FAKEPACA` price cross near its current printing price → the full pipeline fires end-to-end (ws connect → seed → armed → tick cross → exactly one wake → agent resumes and names the trigger price). Same wire protocol as IEX; only the URL and symbol differ. Steps 2–6 below are the same checks against the real feed during market hours.
 2. [ ] Get the current NVDA price:
        `curl -s "https://data.alpaca.markets/v2/stocks/NVDA/trades/latest?feed=iex" -H "APCA-API-KEY-ID: $ALPACA_API_KEY_ID" -H "APCA-API-SECRET-KEY: $ALPACA_API_SECRET_KEY" | jq .trade.p`
 3. [ ] `CHAT` (new conversation `demo-3`): *"Wake me when NVDA drops below $\<current − 0.1%\>. Don't buy anything, just tell me."*
