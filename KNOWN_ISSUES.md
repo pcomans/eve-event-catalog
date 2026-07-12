@@ -56,7 +56,15 @@ Provisioning the Upstash Marketplace integration auto-installed Upstash referenc
 (2026-07-11, user-approved). If another integration is ever added, check `git status` for
 unrequested `agent/` changes afterwards.
 
-## 6. Assorted
+## 6. LangSmith exporter is a silent no-op without `LANGSMITH_TRACING=true`
+
+`LangSmithOTLPTraceExporter` checks `isEnvTracingEnabled()` per export batch; if
+`LANGSMITH_TRACING` (or `LANGSMITH_TRACING_V2`) isn't `"true"`, it drops all spans while
+reporting success to the OTel pipeline — no error, no log. The var is provisioned in Vercel's
+env store (development) as of 2026-07-11, so `vercel env pull` includes it; if traces ever stop
+appearing, check this var first.
+
+## 7. Assorted
 
 - The dev server listens on port **2000**, not 3000 as eve's own docs curl examples suggest.
 - Local durable workflow state lives in `.workflow-data/` (gitignored). If sessions look stuck
