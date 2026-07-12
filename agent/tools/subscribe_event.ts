@@ -12,12 +12,15 @@ import { getConversationBySessionId } from "#catalog/registry.ts";
 // other mechanism.
 export default defineTool({
   description:
-    "Subscribe to an event type found via search_events, then end your turn to suspend — the Event " +
-    'Catalog wakes this same conversation with a "[event-catalog wake]" message when the predicate ' +
-    "fires or the subscription expires. `params` must satisfy the JSON Schema search_events returned " +
-    "for this exact provider/event pair. A rejection here (unknown event type, a still-planned provider, " +
-    "or params that fail the schema) is returned as the tool result with the specific problem named — " +
-    "read it and correct the call in this same turn rather than repeating it unchanged.",
+    "Subscribe to an event type found via search_events — the only way to wait on an external " +
+    "condition; never poll or guess a schedule instead. `params` must satisfy the JSON Schema " +
+    "search_events returned for this exact provider/event pair. A rejection here (unknown event type, " +
+    "a still-planned provider, or params that fail the schema) is returned as the tool result with the " +
+    "specific problem named — read it and correct the call in this same turn rather than repeating it " +
+    "unchanged. After a successful call: tell the user, in one sentence, what you're waiting for and " +
+    "until when, then end your turn — do not loop, sleep, or re-check yourself. The Event Catalog wakes " +
+    "this same conversation with a \"[event-catalog wake]\" message (carrying that event type's own " +
+    "onWake guidance) when the predicate fires or the subscription expires.",
   inputSchema: z.object({
     provider: z.string().min(1).describe('Provider name from search_events, e.g. "alpaca".'),
     event: z.string().min(1).describe('Event name from search_events, e.g. "price.crossesBelow".'),

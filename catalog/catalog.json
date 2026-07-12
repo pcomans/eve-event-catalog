@@ -24,7 +24,8 @@
         "auth": "Alpaca paper API keys",
         "cost": "free (paper account, IEX feed)",
         "durability": "in-process watcher; lost on server restart"
-      }
+      },
+      "onWake": "This fired because the price crossed below the threshold at some point in the past — it does not mean the price is still below it now, a turn later. Before acting on the user's original intent: call get_latest_price for the symbol and get_account for buying power, then re-check the threshold against that FRESH price. If it no longer holds (e.g. the price already bounced back above it), say so plainly and do not trade. Only proceed if the condition still holds."
     },
     {
       "provider": "alpaca",
@@ -50,7 +51,8 @@
         "auth": "Alpaca paper API keys",
         "cost": "free (paper account, IEX feed)",
         "durability": "in-process watcher; lost on server restart"
-      }
+      },
+      "onWake": "This fired because the price crossed above the threshold at some point in the past — it does not mean the price is still above it now, a turn later. Before acting on the user's original intent: call get_latest_price for the symbol and get_account for buying power, then re-check the threshold against that FRESH price. If it no longer holds (e.g. the price already dropped back below it), say so plainly and do not trade. Only proceed if the condition still holds."
     },
     {
       "provider": "alpaca",
@@ -69,7 +71,8 @@
         "auth": "Alpaca paper API keys",
         "cost": "free (paper account)",
         "durability": "in-process watcher; lost on server restart"
-      }
+      },
+      "onWake": "This subscription wakes on ANY terminal order status, not only a fill — check payload.snapshot.status before saying anything. Only \"filled\" is a success: report the symbol, filled quantity (payload.snapshot.filledQty), and average fill price (payload.snapshot.filledAvgPrice), and how that compares to the price that originally triggered the trade. Any other terminal status (\"canceled\", \"rejected\", \"expired\") is not a trade — say so plainly and never describe it as a successful purchase."
     },
     {
       "provider": "edgar",
@@ -94,7 +97,8 @@
         "auth": "none (descriptive User-Agent header only)",
         "cost": "free",
         "durability": "in-process poller; lost on server restart"
-      }
+      },
+      "onWake": "Report the filing conversationally: form type (payload.snapshot.form), company (payload.snapshot.company), and filing date (payload.snapshot.filingDate); include the link (payload.snapshot.url) if useful. No re-check is needed — unlike a price level, a published SEC filing is immutable, so there's nothing to re-verify before reporting it."
     }
   ]
 }

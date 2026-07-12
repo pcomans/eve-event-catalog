@@ -54,6 +54,17 @@ test("search ranks event types by keyword overlap and returns full provider meta
   assert.ok(results[0].metadata.cost.length > 0);
   // alpaca went "active" in task #4 — this result is genuinely usable now.
   assert.equal(results[0].status, "active");
+  // Wakes carry their manual: onWake is discoverable up front, not just at fire time.
+  assert.ok(results[0].onWake.length > 0);
+});
+
+test("every catalog.json entry declares non-empty onWake guidance — wakes always carry their manual", () => {
+  for (const eventType of EVENT_TYPES) {
+    assert.ok(
+      eventType.onWake && eventType.onWake.length > 0,
+      `${eventType.provider}.${eventType.event} is missing onWake guidance`,
+    );
+  }
 });
 
 test("search clearly labels a 'planned' entry as such, not silently offered as usable", async () => {

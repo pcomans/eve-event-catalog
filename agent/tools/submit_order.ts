@@ -13,7 +13,10 @@ export default defineTool({
   description:
     "Submit a market buy order on the Alpaca paper trading account for a fixed dollar notional. " +
     "Requires human approval before it runs — state clearly what you're about to buy (symbol, dollar " +
-    "amount) before calling it. Buy-only, market orders only; nothing else is supported.",
+    "amount) before calling it; if declined, tell the user you did not trade and why. Buy-only, market " +
+    "orders only; nothing else is supported. After a successful call: subscribe_event to alpaca's " +
+    "order.filled with resource set to this order's id (orderId), then end your turn — the outcome " +
+    "arrives as a wake carrying that event type's own onWake guidance for how to report it.",
   inputSchema: z.object({
     symbol: z.string().min(1).describe('Ticker symbol to buy, e.g. "NVDA".'),
     notionalUsd: z

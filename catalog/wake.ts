@@ -1,6 +1,6 @@
 import type { Subscription, SubscriptionStatus, WakePayload } from "./types.ts";
 import { getSubscription, listSubscriptionsByStatus, updateSubscription } from "./registry.ts";
-import { getProvider } from "./catalog.ts";
+import { findEventType, getProvider } from "./catalog.ts";
 import { logCatalog } from "./log.ts";
 
 // Single-process claim guards. All callers (expiry timers, provider ticks,
@@ -72,17 +72,47 @@ export function buildWakePayload(
 
 /**
  * Builds the exact top-level shape sent to /catalog/wake and, folded into
- * the message, shown to the agent: {subscribedAt, firedAt, payload}. Nested,
- * not spread — a payload containing fields literally named `subscribedAt`
- * or `firedAt` lands at `envelope.payload.subscribedAt`, never able to
- * overwrite the channel-generated top-level ones. Pure — no I/O.
+ * the message, shown to the agent: {subscribedAt, firedAt, payload, guidance}.
+ * `payload` is nested, not spread — a payload containing fields literally
+ * named `subscribedAt`/`firedAt`/`guidance` lands inside `envelope.payload`,
+ * never able to overwrite the channel-generated top-level ones. `guidance`
+ * is likewise a sibling of `payload`, never sourced from it — see
+ * resolveWakeGuidance's doc comment for why that separation is the whole
+ * point. Pure — no I/O.
  */
 export function buildWakeEnvelope(
   subscribedAt: string,
   firedAt: string,
   payload?: Record<string, unknown>,
-): { subscribedAt: string; firedAt: string; payload?: Record<string, unknown> } {
-  return { subscribedAt, firedAt, payload };
+  guidance?: string,
+): { subscribedAt: string; firedAt: string; payload?: Record<string, unknown>; guidance?: string } {
+  return { subscribedAt, firedAt, payload, guidance };
+}
+
+// Shown for reason: "expired", regardless of event type — an edge-triggered
+// predicate that never crossed means the same thing no matter what it was
+// watching, so unlike a "fired" wake's guidance this isn't looked up per
+// provider/event in catalog.json.
+const EXPIRED_GUIDANCE =
+  "This subscription's condition never triggered before it expired. Expiry only proves the tracked " +
+  "transition never happened during the window you were watching — not what the underlying value was " +
+  "doing the whole time (e.g. a threshold could already have been past it before you started watching, " +
+  "or never gone near it). Close the loop with the user conversationally without asserting where things " +
+  "actually stood, and do not act as though the event happened.";
+
+/**
+ * Resolves the prompt-shaped guidance a wake carries. SECURITY BOUNDARY: the
+ * returned text always originates from catalog.json (via `sub.provider`/
+ * `sub.event` — the subscription's own fields, fixed and Ajv-validated at
+ * subscribe() time) or the hardcoded constant above; it is never read from
+ * `options.snapshot`, which is provider-supplied, external, untrusted data.
+ * The subscription's provider/event are used only as a lookup KEY into
+ * repo-owned text, never as the guidance content itself — see AGENTS.md.
+ * Pure.
+ */
+export function resolveWakeGuidance(sub: Subscription, options: DeliverOptions): string | undefined {
+  if (options.reason === "expired") return EXPIRED_GUIDANCE;
+  return findEventType(sub.provider, sub.event)?.onWake;
 }
 
 async function disarmSafely(sub: Subscription): Promise<void> {
@@ -111,6 +141,7 @@ export async function deliverWake(sub: Subscription, options: DeliverOptions): P
 
   const firedAt = new Date().toISOString();
   const payload = buildWakePayload(sub, options, firedAt);
+  const guidance = resolveWakeGuidance(sub, options);
 
   try {
     const res = await fetch(`${CATALOG_BASE_URL}/catalog/wake`, {
@@ -119,7 +150,15 @@ export async function deliverWake(sub: Subscription, options: DeliverOptions): P
       // firedAt is passed explicitly so the timestamp stored on the
       // subscription below and the one the agent actually sees are the
       // same value, not two independent `new Date()` calls a few ms apart.
-      body: JSON.stringify({ conversationId: sub.conversationId, payload, subscribedAt: sub.armedAt, firedAt }),
+      // guidance is resolved here, from the trusted `sub` (not `payload`),
+      // and passed as its own top-level field for the same reason.
+      body: JSON.stringify({
+        conversationId: sub.conversationId,
+        payload,
+        subscribedAt: sub.armedAt,
+        firedAt,
+        guidance,
+      }),
     });
     if (!res.ok) throw new Error(`wake POST ${res.status}: ${await res.text()}`);
 

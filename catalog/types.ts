@@ -26,6 +26,16 @@ export interface EventType {
   params: JsonSchema;
   tags: string[];
   metadata: ProviderMetadata;
+  /**
+   * Prompt-shaped instructions for handling a wake of THIS event — e.g. the
+   * TOCTOU re-check for a price crossing, or branching on payload.snapshot.status
+   * for an order. Delivered verbatim inside the wake message (see wake.ts's
+   * resolveWakeGuidance) and shown in search_events results. Repo-owned by
+   * design: never derived from, or allowed to be influenced by,
+   * `payload`/`snapshot` (external, provider-supplied data) — see AGENTS.md's
+   * wake-guidance security boundary.
+   */
+  onWake: string;
 }
 
 /**

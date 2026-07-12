@@ -73,11 +73,13 @@ export default defineChannel({
         payload,
         subscribedAt: subscribedAtOverride,
         firedAt: firedAtOverride,
+        guidance,
       } = (await req.json()) as {
         conversationId: string;
         payload?: Record<string, unknown>;
         subscribedAt?: string;
         firedAt?: string;
+        guidance?: string;
       };
 
       const known = await getConversation(conversationId);
@@ -95,10 +97,17 @@ export default defineChannel({
       // agent's envelope show the same timestamp); a synthetic wake with no
       // subscription (AT-2) mints its own. `payload` is nested under its
       // own key in buildWakeEnvelope, not spread, so nothing in it can ever
-      // shadow these two fields.
+      // shadow these two fields. `guidance` (for a real wake) is computed
+      // server-side by wake.ts's resolveWakeGuidance from the subscription's
+      // own catalog-validated provider/event — never from `payload` — and
+      // arrives here as this same kind of explicit top-level field; see
+      // AGENTS.md for the wake-guidance security boundary this preserves.
+      // This route itself is unauthenticated, consistent with the rest of
+      // this POC's local-only scope (see wake.ts's cross-instance-dedup
+      // note) — hardening it is a separate, explicitly out-of-scope concern.
       const subscribedAt = subscribedAtOverride ?? known.startedAt;
       const firedAt = firedAtOverride ?? new Date().toISOString();
-      const wakeMessage = `[event-catalog wake] ${JSON.stringify(buildWakeEnvelope(subscribedAt, firedAt, payload))}`;
+      const wakeMessage = `[event-catalog wake] ${JSON.stringify(buildWakeEnvelope(subscribedAt, firedAt, payload, guidance))}`;
 
       const session = await send(wakeMessage, { auth: null, continuationToken: conversationId });
 

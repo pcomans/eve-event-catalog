@@ -25,9 +25,11 @@ Redis), `wake.ts` (delivery + expiry timers), `providers/` (alpaca, edgar). The 
 /catalog/chat` starts/continues a conversation, `POST /catalog/wake` resumes a parked session,
 `GET /catalog/subscriptions` shows the registry. Subscriptions are `pending` during a turn and
 armed only on `turn.completed` (closes the tick-arrives-mid-turn race). Wake envelope is
-`{subscribedAt, firedAt, payload}` — `subscribedAt` = armedAt, payload can never shadow envelope
-fields. Full design: `/Users/philipp/.claude/plans/jolly-dazzling-waterfall.md` (session plan);
-lifecycle: `pending → armed → delivering → fired | expired | failed`.
+`{subscribedAt, firedAt, payload, guidance}` — `subscribedAt` = armedAt, payload can never shadow
+envelope fields, and `guidance` is catalog-owned handling instructions (see the wake-guidance
+security rule below), never derived from `payload`. Full design:
+`/Users/philipp/.claude/plans/jolly-dazzling-waterfall.md` (session plan); lifecycle:
+`pending → armed → delivering → fired | expired | failed`.
 
 ## Hard rules (from Philipp)
 
@@ -45,14 +47,26 @@ lifecycle: `pending → armed → delivering → fired | expired | failed`.
    truth for event types; its JSON Schemas are *enforced* at subscribe() time (Ajv). Entries
    without a registered provider are `"status": "planned"`; `assertCatalogHonesty()` must fail
    the boot if an "active" entry has no handler. Never advertise what isn't implemented.
-4. **Tests are written red-green** (failing test first), node:test, no test-framework deps.
-5. **Check current versions before adding any dependency** (npm registry) — never install from
+5. **Tests are written red-green** (failing test first), node:test, no test-framework deps.
+6. **Check current versions before adding any dependency** (npm registry) — never install from
    memory. Pin eve exactly.
-   Never put test files under `agent/` — eve discovery-scans those directories as agent
+7. **Never put test files under `agent/`** — eve discovery-scans those directories as agent
    definitions and a stray `*.test.ts` breaks `pnpm dev`/build. Tests for `agent/*` code live in
    `tests/` (e.g. `tests/agent-tools/`); catalog tests stay next to their modules in `catalog/`.
-6. Every coding step gets an independent Codex review (gpt-5.6-sol, xhigh) before dependent work
+8. Every coding step gets an independent Codex review (gpt-5.6-sol, xhigh) before dependent work
    builds on it — orchestrated by the session lead; don't self-certify.
+9. **Wake guidance is repo-owned; event payloads are not.** Each `catalog.json` entry's `onWake`
+   field is prompt-shaped instructions for handling that event type's wake — shown in
+   `search_events` results and delivered again inside the wake message when it fires. It is
+   resolved server-side (`wake.ts`'s `resolveWakeGuidance`) from the *subscription's own*
+   `provider`/`event` (fixed, Ajv-validated at `subscribe()` time), and must never be derived
+   from, or built out of, `payload`/`snapshot` — the tick/poll data an external provider (Alpaca,
+   EDGAR, or any future one) supplies at fire time. That data is untrusted by construction; the
+   agent's own instructions tell it the same thing (`payload` is data to reason about, `guidance`
+   is instructions to follow) so the boundary holds even if a provider's field ever contained
+   adversarial text. Note: the `/catalog/wake` HTTP route itself is unauthenticated, consistent
+   with the rest of this POC's local-only scope (`wake.ts`'s cross-instance-dedup note) —
+   hardening that route is a separate, out-of-scope concern from this rule.
 
 ## Environment
 

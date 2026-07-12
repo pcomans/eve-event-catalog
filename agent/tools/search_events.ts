@@ -13,9 +13,12 @@ export default defineTool({
     'Search the Event Catalog for subscribable event types — things you can wait on, like a stock ' +
     'price crossing a threshold, a new SEC filing, or an order reaching "filled". Always call this ' +
     "before subscribe_event: it returns the exact provider/event names, the JSON Schema subscribe_event's " +
-    "params must satisfy, and each provider's metadata (freshness, latency, auth, cost, durability) so " +
-    'you can pick a source for real reasons. A result with status "planned" is documented in the catalog ' +
-    "but has no working provider yet — never subscribe to it; tell the user it isn't available.",
+    "params must satisfy, each provider's metadata (freshness, latency, auth, cost, durability) so you " +
+    "can pick a source for real reasons, and that event type's onWake — guidance for handling its wake " +
+    "once you're subscribed (e.g. a re-check rule, or how to interpret its snapshot fields) that arrives " +
+    "again inside the wake message itself when it fires, so you don't need to remember it now. A result " +
+    'with status "planned" is documented in the catalog but has no working provider yet — never ' +
+    "subscribe to it; tell the user it isn't available.",
   inputSchema: z.object({
     query: z
       .string()
@@ -37,6 +40,7 @@ export default defineTool({
         params: result.params,
         metadata: result.metadata,
         tags: result.tags,
+        onWake: result.onWake,
       })),
     };
   },
