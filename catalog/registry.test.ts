@@ -7,6 +7,7 @@ import {
   deleteConversation,
   deleteSubscription,
   getConversation,
+  getConversationBySessionId,
   getSubscription,
   listSubscriptionsByStatus,
   recordConversation,
@@ -122,4 +123,24 @@ test("recordConversation preserves the original startedAt across repeat calls", 
 
   const fetched = await getConversation(conversationId);
   assert.deepEqual(fetched, second);
+});
+
+// Tools only ever see ctx.session.id (the eve sessionId), never the
+// conversationId subscriptions are keyed by (eve's ToolContext has no
+// continuationToken accessor). This reverse index is how subscribe_event
+// recovers its own conversationId.
+test("getConversationBySessionId recovers the conversation record from the eve sessionId", async (t) => {
+  const conversationId = testConversationId();
+  const sessionId = `session:${randomUUID()}`;
+  t.after(() => deleteConversation(conversationId));
+
+  const recorded = await recordConversation(conversationId, sessionId);
+  const bySession = await getConversationBySessionId(sessionId);
+
+  assert.deepEqual(bySession, recorded);
+});
+
+test("getConversationBySessionId returns null for an unknown session id", async () => {
+  const result = await getConversationBySessionId(`session:${randomUUID()}`);
+  assert.equal(result, null);
 });

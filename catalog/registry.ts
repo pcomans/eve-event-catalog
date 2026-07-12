@@ -14,6 +14,10 @@ const redis = Redis.fromEnv();
 const SUB_KEY = (id: string) => `catalog:sub:${id}`;
 const SUB_INDEX_KEY = "catalog:subs";
 const CONV_KEY = (conversationId: string) => `catalog:conv:${conversationId}`;
+// Reverse index: a tool's ctx.session.id is the eve sessionId, not the
+// conversationId subscriptions are keyed by (eve's ToolContext exposes no
+// continuationToken accessor — see getConversationBySessionId below).
+const CONV_BY_SESSION_KEY = (sessionId: string) => `catalog:conv-by-session:${sessionId}`;
 
 export interface ConversationRecord {
   conversationId: string;
@@ -119,9 +123,25 @@ export async function recordConversation(
     startedAt: existing?.startedAt ?? new Date().toISOString(),
   };
   await redis.set(CONV_KEY(conversationId), record);
+  await redis.set(CONV_BY_SESSION_KEY(sessionId), conversationId);
   return record;
 }
 
 export async function getConversation(conversationId: string): Promise<ConversationRecord | null> {
   return redis.get<ConversationRecord>(CONV_KEY(conversationId));
+}
+
+/**
+ * Recovers the conversation record from an eve sessionId (ctx.session.id in
+ * a tool), the only session handle authored tool code receives. Subscriptions
+ * are keyed by conversationId, so a tool that wants to call catalog.subscribe
+ * goes through this reverse index rather than threading conversationId
+ * through some other channel.
+ */
+export async function getConversationBySessionId(
+  sessionId: string,
+): Promise<ConversationRecord | null> {
+  const conversationId = await redis.get<string>(CONV_BY_SESSION_KEY(sessionId));
+  if (!conversationId) return null;
+  return getConversation(conversationId);
 }
