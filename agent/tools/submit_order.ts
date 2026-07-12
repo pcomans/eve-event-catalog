@@ -16,7 +16,10 @@ export default defineTool({
     "amount) before calling it. Buy-only, market orders only; nothing else is supported.",
   inputSchema: z.object({
     symbol: z.string().min(1).describe('Ticker symbol to buy, e.g. "NVDA".'),
-    notionalUsd: z.number().positive().describe("Dollar amount to spend, e.g. 100 for $100 of the symbol."),
+    notionalUsd: z
+      .number()
+      .min(1)
+      .describe("Dollar amount to spend (minimum $1, Alpaca's notional order floor), e.g. 100 for $100 of the symbol."),
   }),
   approval: always(),
   async execute({ symbol, notionalUsd }) {

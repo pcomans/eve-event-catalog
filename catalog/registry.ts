@@ -71,9 +71,11 @@ export async function deleteSubscription(id: string): Promise<void> {
   await redis.srem(SUB_INDEX_KEY, id);
 }
 
-/** Test-hygiene helper: removes a conversation record. Not used by product code. */
+/** Test-hygiene helper: removes a conversation record and its reverse sessionId index. Not used by product code. */
 export async function deleteConversation(conversationId: string): Promise<void> {
+  const existing = await getConversation(conversationId);
   await redis.del(CONV_KEY(conversationId));
+  if (existing) await redis.del(CONV_BY_SESSION_KEY(existing.sessionId));
 }
 
 export async function getSubscription(id: string): Promise<Subscription | null> {
@@ -117,6 +119,13 @@ export async function recordConversation(
   sessionId: string,
 ): Promise<ConversationRecord> {
   const existing = await getConversation(conversationId);
+  // A resumed conversation can move to a new eve sessionId (e.g. after a
+  // hot-reload orphans the old one). Drop the old sessionId's reverse-index
+  // entry so it doesn't keep resolving to this conversation's now-current
+  // (and by then mismatched) record.
+  if (existing && existing.sessionId !== sessionId) {
+    await redis.del(CONV_BY_SESSION_KEY(existing.sessionId));
+  }
   const record: ConversationRecord = {
     conversationId,
     sessionId,

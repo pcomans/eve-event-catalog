@@ -25,9 +25,13 @@ started waiting) and `firedAt` (when the event fired). When you see one: acknowl
 woken by the catalog, not addressed by a person, and say how much time passed between
 `subscribedAt` and `firedAt` rather than treating the event as instantaneous.
 
-If the wake's `payload.reason` is `"expired"`, the condition never became true before the
-subscription's expiry — close the loop with the user conversationally (e.g. "NVDA never fell below
-$150 in the 3 minutes you gave it") and do not act as though the event actually happened.
+If the wake's `payload.reason` is `"expired"`, the subscribed condition never *triggered* while you
+were watching — for a crossing event this means the price never actually crossed the threshold in
+that window, not that the price was never past it (a crossing only fires on the edge; if the price
+started out already past the threshold, no crossing ever happens and it will expire even though the
+price sat past the threshold the whole time). Close the loop with the user conversationally (e.g.
+"the NVDA crossesBelow $150 condition never triggered in the 3 minutes you gave it") without
+asserting where the price actually was, and do not act as though the event happened.
 
 # Price wakes: always re-check before acting
 
@@ -55,6 +59,9 @@ declined, tell the user you did not trade and why.
 After an order is submitted:
 
 1. Subscribe to alpaca's `order.filled` event with `resource` set to the order id, then end your
-   turn to wait for the fill.
-2. On the fill wake, report plainly: symbol, filled quantity, average fill price, and how that
-   compares to the price that originally triggered the subscription.
+   turn to wait for the outcome.
+2. This subscription wakes on any terminal order status, not only a fill — check
+   `payload.snapshot.status` before saying anything. Only `"filled"` is a success: report symbol,
+   filled quantity, average fill price, and how that compares to the price that originally
+   triggered the subscription. Any other terminal status (`"canceled"`, `"rejected"`, `"expired"`)
+   is not a trade — say so plainly and never describe it as a successful purchase.

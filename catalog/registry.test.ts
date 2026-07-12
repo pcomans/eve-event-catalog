@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
+import { Redis } from "@upstash/redis";
 
 import {
   createSubscription,
@@ -13,6 +14,15 @@ import {
   recordConversation,
   updateSubscription,
 } from "./registry.ts";
+
+// Only used to peek at the raw reverse-index key below: getConversationBySessionId
+// always chains through getConversation, so once a conversation record is
+// gone, the chain returns null whether or not the reverse key itself was
+// cleaned up — checking the key directly is the only way to catch a leak
+// that's harmless today but would waste Redis storage over a long-running
+// dev session.
+const redis = Redis.fromEnv();
+const CONV_BY_SESSION_KEY = (sessionId: string) => `catalog:conv-by-session:${sessionId}`;
 
 // These tests hit a real Redis instance (Upstash, via UPSTASH_REDIS_REST_URL /
 // UPSTASH_REDIS_REST_TOKEN) — no mocking, per the registry's job (survive
@@ -143,4 +153,37 @@ test("getConversationBySessionId recovers the conversation record from the eve s
 test("getConversationBySessionId returns null for an unknown session id", async () => {
   const result = await getConversationBySessionId(`session:${randomUUID()}`);
   assert.equal(result, null);
+});
+
+test("deleteConversation also removes the reverse sessionId index", async () => {
+  const conversationId = testConversationId();
+  const sessionId = `session:${randomUUID()}`;
+
+  await recordConversation(conversationId, sessionId);
+  await deleteConversation(conversationId);
+
+  assert.equal(await getConversation(conversationId), null);
+  assert.equal(await getConversationBySessionId(sessionId), null);
+  // The chain above returns null either way once the forward record is
+  // gone (see comment on the redis import) — check the raw key too, or this
+  // test can't tell "cleaned up" from "merely orphaned".
+  assert.equal(await redis.get(CONV_BY_SESSION_KEY(sessionId)), null);
+});
+
+// recordConversation is called on every /catalog/chat POST for a
+// conversationId, including a resumed conversation whose eve sessionId
+// changed. Without cleanup, the old sessionId's reverse-index entry would
+// dangle forever, resolving to a conversationId whose current sessionId no
+// longer matches it.
+test("recordConversation with a new sessionId drops the stale reverse index for the old one", async (t) => {
+  const conversationId = testConversationId();
+  const oldSessionId = `session:${randomUUID()}`;
+  const newSessionId = `session:${randomUUID()}`;
+  t.after(() => deleteConversation(conversationId));
+
+  await recordConversation(conversationId, oldSessionId);
+  const updated = await recordConversation(conversationId, newSessionId);
+
+  assert.equal(await getConversationBySessionId(oldSessionId), null);
+  assert.deepEqual(await getConversationBySessionId(newSessionId), updated);
 });
