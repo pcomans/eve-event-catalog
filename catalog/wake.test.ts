@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 
-import { armPendingForConversation, buildWakeEnvelope, buildWakePayload, deliverWake } from "./wake.ts";
+import { armPendingForConversation, buildWakeEnvelope, buildWakePayload, deliverWake, shouldSkipArmFailure } from "./wake.ts";
 import { registerProvider } from "./catalog.ts";
 import { createSubscription, deleteSubscription, getSubscription } from "./registry.ts";
 import type { Subscription } from "./types.ts";
@@ -220,4 +220,58 @@ test("armPendingForConversation is idempotent: two concurrent calls arm a subscr
 
   const stored = await getSubscription(sub.id);
   assert.equal(stored?.status, "armed");
+});
+
+test("shouldSkipArmFailure skips when delivery is already claimed, regardless of persisted status", () => {
+  assert.equal(shouldSkipArmFailure(true, "armed"), true);
+  assert.equal(shouldSkipArmFailure(true, undefined), true);
+});
+
+test("shouldSkipArmFailure skips when the persisted status already raced ahead to delivering/fired/expired", () => {
+  assert.equal(shouldSkipArmFailure(false, "delivering"), true);
+  assert.equal(shouldSkipArmFailure(false, "fired"), true);
+  assert.equal(shouldSkipArmFailure(false, "expired"), true);
+});
+
+test("shouldSkipArmFailure does not skip a genuine arm failure", () => {
+  assert.equal(shouldSkipArmFailure(false, "armed"), false);
+  assert.equal(shouldSkipArmFailure(false, "pending"), false);
+  assert.equal(shouldSkipArmFailure(false, "failed"), false);
+  assert.equal(shouldSkipArmFailure(false, undefined), false);
+});
+
+test("armPendingForConversation does not overwrite a status that already raced ahead to fired during a failing arm()", async (t) => {
+  const conversationId = `test:${randomUUID()}`;
+  const providerName = `test-race-provider-${randomUUID()}`;
+  const sub = await createSubscription({
+    conversationId,
+    provider: providerName,
+    event: "fire",
+    resource: "NVDA",
+    params: {},
+    expiresAt: null,
+  });
+  t.after(() => deleteSubscription(sub.id));
+
+  const fetchStub = stubFetchOk();
+  t.after(fetchStub.restore);
+
+  // Simulates a provider tick firing successfully mid-arm() (e.g. a push
+  // event racing a REST seed call), and then the arm's own remaining work
+  // throwing afterward — armPendingForConversation's catch must not clobber
+  // the "fired" status the successful delivery already wrote.
+  registerProvider(providerName, {
+    supportedEvents: ["fire"],
+    arm: async (armedSub) => {
+      await deliverWake(armedSub, { reason: "fired" });
+      throw new Error("seed failed after push already fired");
+    },
+    disarm: async () => {},
+  });
+
+  await armPendingForConversation(conversationId);
+
+  const stored = await getSubscription(sub.id);
+  assert.equal(stored?.status, "fired");
+  assert.equal(stored?.lastError, null);
 });

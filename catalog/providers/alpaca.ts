@@ -199,6 +199,10 @@ export function subscriptionsForOrderUpdate(
 // One shared trading-updates connection for every order.filled subscription
 // — opened when the first one arms, closed when the last one disarms.
 let tradingStream: TradingStream | null = null;
+// Resolves once the server has ack'd our `listen` request for trade_updates
+// — see ensureTradingStream's comment on why this needs its own promise
+// rather than reusing whenAuthenticated().
+let tradingStreamListening: Promise<void> | null = null;
 
 function ensureTradingStream(): TradingStream {
   if (tradingStream) return tradingStream;
@@ -211,14 +215,41 @@ function ensureTradingStream(): TradingStream {
   stream.onReconnecting((attempt) => log(`trade-updates reconnecting attempt=${attempt}`));
   stream.onReconnected(() => log("trade-updates reconnected"));
   stream.onError((err) => log(`trade-updates error ${err}`));
-  stream.onConnect(() => {
-    stream.subscribeTradeUpdates();
-    log("trade-updates subscribed");
-  });
+  stream.onConnect(() => stream.subscribeTradeUpdates());
   stream.onTradeUpdate(handleTradeUpdate);
+
+  // Authenticated only means the socket is up — the server hasn't yet ack'd
+  // that it's actually routing trade_updates frames to us. That ack arrives
+  // as a `{"stream":"listening",...}` frame, which the SDK maps internally
+  // to a "subscription" event (EVENT.SUBSCRIPTION) on the underlying
+  // EventEmitter — there's no typed onListening/whenListening wrapper for
+  // it (verified against the SDK's bundled source and live against the
+  // real trade_updates endpoint), so this listens for the raw event
+  // directly rather than inventing separate machinery.
+  tradingStreamListening = new Promise<void>((resolve) => {
+    stream.on(streaming.EVENT.SUBSCRIPTION, (channels: string[]) => {
+      if (channels.includes("trade_updates")) {
+        log("trade-updates subscribed");
+        resolve();
+      }
+    });
+  });
+
   stream.connect();
   tradingStream = stream;
   return stream;
+}
+
+/** Tears down the shared trading-updates connection and drops the cached instance — the next arm() must build a fresh one, never reuse a torn-down (or auth-poisoned) object. */
+function closeTradingStream(): void {
+  tradingStream?.disconnect();
+  tradingStream = null;
+  tradingStreamListening = null;
+}
+
+/** Closes the shared stream once nothing is watching any order anymore — shared by the normal disarm path and arm-failure cleanup, so a failure never strands a connection nobody's using. */
+function maybeCloseTradingStream(): void {
+  if (countOrderFilledSubs(orderFilledSubs) === 0) closeTradingStream();
 }
 
 function handleTradeUpdate(update: TradeUpdate): void {
@@ -245,7 +276,7 @@ function unregisterOrderFilledSub(sub: Subscription): void {
 }
 
 async function armOrderFilled(sub: Subscription): Promise<void> {
-  // Register — and make sure the trade_updates stream is authenticated and
+  // Register — and make sure the trade_updates stream is authenticated AND
   // listening — BEFORE the REST seed check below, not after. If the order
   // went terminal while that REST call was in flight, its push event must
   // find a routing entry already in place; a push for a transition that
@@ -261,7 +292,15 @@ async function armOrderFilled(sub: Subscription): Promise<void> {
   try {
     const stream = ensureTradingStream();
     const auth = await stream.whenAuthenticated();
-    if (!auth.authenticated) throw new Error(describeAuthFailure("trade-updates", auth));
+    if (!auth.authenticated) {
+      // The stream itself is broken, not just this one subscription — drop
+      // the cached instance immediately so no other in-flight or future
+      // arm() reuses a connection that's already known to be dead.
+      closeTradingStream();
+      throw new Error(describeAuthFailure("trade-updates", auth));
+    }
+
+    await tradingStreamListening;
 
     const order = await getOrder(sub.resource);
     if (TERMINAL_ORDER_STATUSES.has(order.status)) {
@@ -269,16 +308,14 @@ async function armOrderFilled(sub: Subscription): Promise<void> {
     }
   } catch (err) {
     unregisterOrderFilledSub(sub);
+    maybeCloseTradingStream();
     throw err;
   }
 }
 
 function disarmOrderFilled(sub: Subscription): void {
   unregisterOrderFilledSub(sub);
-  if (countOrderFilledSubs(orderFilledSubs) === 0 && tradingStream) {
-    tradingStream.disconnect();
-    tradingStream = null;
-  }
+  maybeCloseTradingStream();
 }
 
 async function arm(sub: Subscription): Promise<void> {

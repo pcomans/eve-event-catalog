@@ -1,4 +1,4 @@
-import type { Subscription, WakePayload } from "./types.ts";
+import type { Subscription, SubscriptionStatus, WakePayload } from "./types.ts";
 import { getSubscription, listSubscriptionsByStatus, updateSubscription } from "./registry.ts";
 import { getProvider } from "./catalog.ts";
 import { logCatalog } from "./log.ts";
@@ -135,6 +135,22 @@ export async function deliverWake(sub: Subscription, options: DeliverOptions): P
 }
 
 /**
+ * True if a failing arm() attempt must NOT overwrite the subscription's
+ * status with "failed" — because delivery already raced ahead of it. A
+ * provider's arm() can call deliverWake synchronously (e.g. a push event
+ * arriving while an earlier REST seed call in the same arm() is still in
+ * flight); if that succeeds and arm()'s own remaining work then throws, the
+ * subscription has already legitimately reached "delivering"/"fired"/
+ * "expired" and armPendingForConversation's catch must leave it alone.
+ * Checked against deliverWake's in-process claim (catches the race before
+ * any Redis write lands) and the persisted status (catches it after). Pure.
+ */
+export function shouldSkipArmFailure(claimed: boolean, currentStatus: SubscriptionStatus | undefined): boolean {
+  if (claimed) return true;
+  return currentStatus === "delivering" || currentStatus === "fired" || currentStatus === "expired";
+}
+
+/**
  * Arms every "pending" subscription on a conversation: pending -> armed,
  * provider.arm(sub), expiry timer started. Called from the channel's
  * `turn.completed` handler so a subscription never arms mid-turn (the
@@ -182,6 +198,11 @@ export async function armPendingForConversation(conversationId: string): Promise
       armed.push(armedSub);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const current = await getSubscription(sub.id);
+      if (shouldSkipArmFailure(deliveryClaimed.has(sub.id), current?.status)) {
+        logCatalog("arm-failed-but-already-delivered", current ?? sub, { error: message });
+        continue;
+      }
       const failed = await updateSubscription(sub.id, { status: "failed", lastError: message });
       logCatalog("arm-failed", failed, { error: message });
     }
