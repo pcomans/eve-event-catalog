@@ -311,22 +311,31 @@ demo. It records the sharp edges found while building against eve 0.22.5 beta.
 
 ## Deploying to Vercel
 
-Everything in this system maps to a Vercel primitive, and the deployment is being executed in
-phases (full plan: [`docs/plan-vercel-production.md`](docs/plan-vercel-production.md)). The
-target is **one Vercel project running three Vercel Services** with private bindings and one
-shared Upstash Redis:
+Every part of the system runs on a Vercel primitive. One Vercel project, three
+[Vercel Services](https://vercel.com/docs/services) connected by private bindings:
+
+| Part | Vercel primitive |
+|---|---|
+| Agent + catalog API + wake route (the eve app) | **Vercel Functions** (Fluid compute) |
+| Watching the world: Alpaca websockets, EDGAR polling, expiry timers | **Vercel Workflows** — durable steps that chain forever |
+| Wake delivery (event fired → agent woken) | **Vercel Queues** |
+| Public observatory (equity, subscriptions, event feed, transcripts) | **Next.js on Vercel** |
+| Model access (DeepSeek via OIDC — no provider keys in prod) | **Vercel AI Gateway** |
+| All state: subscriptions, leases, cursors, event history | **Upstash Redis** (Vercel Marketplace) |
+| Daily market-open turn | **Vercel Cron** (eve schedule) |
+| Secrets | **Vercel env store** (`vercel env pull` locally) |
 
 ```mermaid
 flowchart TB
     subgraph project["One Vercel project — three Vercel Services, private bindings"]
-        EVE["eve app — Nitro → Functions<br/>agent · catalog API · wake route 🔒"]
-        CONN["connector runtime — workflow pkg<br/>chained socket-session steps ·<br/>gap replay · EDGAR sweep · expiry"]
-        OBS["observatory — Next.js, public read-only<br/>equity · subscriptions · event feed ·<br/>full transcripts"]
+        EVE["eve app — Functions<br/>agent · catalog API · wake route 🔒"]
+        CONN["connector — Workflows<br/>websockets · polls · timers"]
+        OBS["observatory — Next.js<br/>public, read-only"]
     end
-    Q["Vercel Queues<br/>wake delivery"]
-    R[("Upstash Redis<br/>registry · leases · cursors ·<br/>seen-sets · event history")]
-    W["Alpaca websockets/REST · SEC EDGAR"]
-    CONN -->|"watch (push + coalesced poll)"| W
+    Q["Queues<br/>wake delivery"]
+    R[("Upstash Redis<br/>all state")]
+    W["Alpaca · SEC EDGAR"]
+    CONN -->|"watch"| W
     CONN -->|"event fired"| Q
     Q -->|"wake"| EVE
     EVE <--> R
@@ -335,26 +344,11 @@ flowchart TB
     OBS -->|"transcript replay"| EVE
 ```
 
-- **eve app** deploys as an ordinary Vercel project: `eve build` emits Vercel Build Output when
-  `VERCEL` is set, and `vercel deploy` (not `--prebuilt`) puts the agent, catalog API, and the
-  authenticated wake route on Functions. Secrets live in the Vercel env store — the same store
-  local development already pulls from.
-- **The connector runtime** is the answer to "who holds the websocket": a sibling service on the
-  public `workflow` package, chaining bounded socket-session steps forever (each run re-invokes
-  itself — recursion across runs), with per-symbol cursors and historical gap replay so an
-  edge-triggered crossing that happens *between* sessions is still caught. EDGAR polling and
-  subscription expiry move onto durable timers in the same service.
-- **The observatory** is the public face: a read-only Next.js site rendering the campaign
-  (equity, positions), the live subscriptions table, the event feed (from the same
-  `GET /catalog/events` history this repo already writes), and full conversation transcripts.
-- **Wake delivery** rides Vercel Queues (at-least-once), which is why the delivery semantics in
-  this repo — leases, recovery sweep, per-subscription dedupe — were built queue-shaped from the
-  start: the Phase 1 code *is* the consumer-side correctness the queue needs.
-
-Deployment status: the delivery backbone (Phase 1) is complete and running locally with
-cloud-safe semantics; the connector service, durable timers, standing-mandate agent, observatory,
-and the production deploy itself are Phases 2–6 of the plan. Until Phase 6 lands, cloning this
-repo gets you the fully-working local system described above.
+Status: the delivery backbone (Phase 1) is done — built queue-shaped so the local code is
+already the queue's consumer-side correctness. The connector, durable timers, mandate agent,
+observatory, and the deploy itself are Phases 2–6 of
+[`docs/plan-vercel-production.md`](docs/plan-vercel-production.md). Until then, cloning this
+repo gets you the fully-working local system.
 
 ## Verification and observability
 
