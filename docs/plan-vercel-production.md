@@ -222,16 +222,23 @@ Phase 1 Codex gate).
   acknowledged plan (bearings → research → subscribe broadly → trade selectively → re-arm) is
   the campaign loop in its own words; note it independently identified buy-without-sell as a
   one-way ratchet and chose conservative sizing — instructions should preserve that instinct.
-- **Web search: eve's built-in `web_search` (DECIDED 2026-07-12, Philipp: "provider supplied web
-  search is fine, no need for tavily").** eve's default harness ships `web_search` as a
-  provider-managed tool (the model provider executes it; no local executor). VERIFY EARLY in
-  Phase 4 that it actually resolves through AI Gateway + DeepSeek V4-Pro — provider-managed
-  means provider-dependent, and DeepSeek has no known native search backend. If it doesn't work,
-  fallbacks in order (Philipp, 2026-07-12): (a) **switch the campaign model to a
-  search-capable provider on the Gateway** (e.g. gpt-5.6 — one model-id change, no new vendor
-  or key; the DeepSeek-on-Gateway angle was never a goal in itself); (b) the
-  previously-approved Tavily defineTool override, keeping DeepSeek — only then does
-  TAVILY_API_KEY come back.
+- **Web search — RESEARCHED 2026-07-13 (Gateway docs verified; supersedes the earlier fallback
+  ladder).** Facts: (1) AI Gateway ships **model-agnostic search tools** —
+  `gateway.tools.perplexitySearch()/exaSearch()/parallelSearch()` — executed by the Gateway
+  itself, work with ANY model incl. DeepSeek, $5–7/1k searches billed via Vercel
+  ([docs](https://vercel.com/docs/ai-gateway/models-and-providers/web-search)). (2) OpenAI's
+  native search works through the Gateway on OpenAI models (`openai.tools.webSearch({})`).
+  (3) DeepSeek's own native search (its Anthropic-compatible endpoint) is NOT exposed through
+  the Gateway. (4) All of it requires **paid Gateway credits** — the team is currently free-tier
+  (probe 2026-07-13: gpt-5.6-terra refused with "Free tier users do not have access"; raw
+  `{"type":"web_search"}` on /v1/responses was silently ignored for Sonnet — the documented
+  wiring is AI SDK tool definitions, which matches how eve calls models). **HEAD-TO-HEAD PROBED
+  2026-07-13 after Philipp topped up $14 Gateway credit — BOTH paths work**, same correct cited
+  answer (S&P 500 7,575.39 on 2026-07-10): (A) DeepSeek V4-Pro + `gateway.tools.parallelSearch`
+  (1 search, Yahoo+Investing citations, richer detail) and (B) gpt-5.6-terra + OpenAI native
+  `web_search` (2 searches, AP citation). DECISION AT PHASE 4 KICKOFF (Philipp's): A keeps the
+  locked model pick and cheaper tokens; B is his search-quality lean. Either way: no Tavily, no
+  new vendor; the eve-side work is one defineTool override.
 - **Campaign lifecycle**: an eve schedule (agent/schedules/) opens the market day — wakes the
   campaign conversation with a "market's open, review and act" turn; the event catalog does the
   intraday waking. Decide in design: one perpetual conversation vs daily conversations linked by
