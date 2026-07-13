@@ -215,6 +215,13 @@ Phase 1 Codex gate).
   research, pick watches (price crossings both directions now meaningful, EDGAR filings as
   signals), size positions, realize P&L, always leave a subscription armed (the campaign must
   never dead-end with nothing watched). Keep the identity-only prompt discipline from task #10.
+  **Seed wording, validated live 2026-07-13 (campaign-launch-1, approved by Philipp):** "your
+  standing goal is to grow this account — make (paper) money … research what is worth watching,
+  subscribe to the events that would tell you when to act (price crossings both directions,
+  filings), and trade when you have a reason … never end a turn with nothing armed." The agent's
+  acknowledged plan (bearings → research → subscribe broadly → trade selectively → re-arm) is
+  the campaign loop in its own words; note it independently identified buy-without-sell as a
+  one-way ratchet and chose conservative sizing — instructions should preserve that instinct.
 - **Web search: eve's built-in `web_search` (DECIDED 2026-07-12, Philipp: "provider supplied web
   search is fine, no need for tavily").** eve's default harness ships `web_search` as a
   provider-managed tool (the model provider executes it; no local executor). VERIFY EARLY in
@@ -231,7 +238,12 @@ Phase 1 Codex gate).
   a Redis-stored campaign summary (context growth over weeks says: daily conversations +
   carried-forward summary; the site threads them into one campaign view).
 
-**Phase 5 — public observatory.** Hosting per Phase 0. Pages: (a) campaign view: equity curve +
+**Phase 5 — public observatory.** Hosting per Phase 0. **UI base (Philipp, 2026-07-13): evaluate
+[vercel/chatbot](https://github.com/vercel/chatbot) as the starting point ONLY if it reduces
+work** — it is chat-first (composer, auth, its own persistence) versus our read-only transcript
+replay, so the likely value is its message-rendering components and styling, not its skeleton.
+Decide with a short time-boxed spike at Phase 5 kickoff, not by default. Pages: (a) campaign
+view: equity curve +
 positions + realized P&L over time (Alpaca account history; load the dataviz skill for charts),
 (b) subscriptions table (live lifecycle from Redis), (c) event feed (wakes/arms/fires/expiries
 with timestamps + elapsed times), (d) conversation/decision view (transcripts via
