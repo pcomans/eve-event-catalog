@@ -222,9 +222,9 @@ Phase 1 Codex gate).
   means provider-dependent, and DeepSeek has no known native search backend. If it doesn't work,
   fallbacks in order (Philipp, 2026-07-12): (a) **switch the campaign model to a
   search-capable provider on the Gateway** (e.g. gpt-5.6 — one model-id change, no new vendor
-  or key; slight trade-off: the "DeepSeek agent on AI Gateway" breadth story for the pitch
-  softens); (b) the previously-approved Tavily defineTool override, keeping DeepSeek — only
-  then does TAVILY_API_KEY come back.
+  or key; the DeepSeek-on-Gateway angle was never a goal in itself); (b) the
+  previously-approved Tavily defineTool override, keeping DeepSeek — only then does
+  TAVILY_API_KEY come back.
 - **Campaign lifecycle**: an eve schedule (agent/schedules/) opens the market day — wakes the
   campaign conversation with a "market's open, review and act" turn; the event catalog does the
   intraday waking. Decide in design: one perpetual conversation vs daily conversations linked by
