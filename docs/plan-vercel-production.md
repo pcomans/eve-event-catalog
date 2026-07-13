@@ -140,7 +140,12 @@ and #3's Nitro caveat. New gate 7 (unbounded-workflow API) is the only fresh res
    detected; custom channel routes → Nitro → Functions. Route-auth secrets must be **real Vercel
    env vars** (not baked into `.env.local`). Model creds: AI Gateway via OIDC (automatic on
    Vercel) or explicit keys. **Self-invoking wake loopback works UNLESS Deployment Protection is
-   on → then attach `VERCEL_AUTOMATION_BYPASS_SECRET` to the wake POST.** Agent Runs tab exists
+   on → then attach `VERCEL_AUTOMATION_BYPASS_SECRET` to the wake POST. DECIDED (Philipp,
+   2026-07-13): Deployment Protection OFF — open from day one, including half-built previews;
+   the write routes' bearer auth is the security boundary, and no bypass-secret plumbing is
+   needed anywhere. LangSmith also DECIDED same date: skip the paid upgrade for now (quota-dead
+   until Aug 1, see KNOWN_ISSUES #6); event feed + session streams + observatory carry
+   observability; revisit at Phase 6 only if campaign debugging demands it.** Agent Runs tab exists
    but is gated (team enablement) — not a programmatic API, don't depend on it.
 6. **Dashboard: DECIDED — Next.js as a Vercel Service.** No eve session-list API exists (grepped
    dist); track sessionIds in Redis (already do). Reuse eve's `defaultMessageReducer` (`eve/react`
@@ -245,9 +250,12 @@ Phase 1 Codex gate).
   new vendor; the eve-side work is one defineTool override.
 - **Campaign lifecycle**: an eve schedule (agent/schedules/) opens the market day — wakes the
   campaign conversation with a "market's open, review and act" turn; the event catalog does the
-  intraday waking. Decide in design: one perpetual conversation vs daily conversations linked by
-  a Redis-stored campaign summary (context growth over weeks says: daily conversations +
-  carried-forward summary; the site threads them into one campaign view).
+  intraday waking. **DECIDED (Philipp, 2026-07-13): ONE perpetual conversation** — maximal
+  memory/continuity AND the simplest build (no summary-writer, no daily-boundary schedule
+  logic, and the observatory threads exactly one session stream). Accepts unbounded context
+  growth: monitor per-turn cost in the event feed; daily-conversations-with-carried-summary is
+  the known evolution if a context/cost wall appears mid-campaign — hitting that wall is an
+  ESCALATE-TO-PHILIPP moment, not an autonomous restructure.
 
 **Phase 5 — public observatory.** Hosting per Phase 0. **UI base (Philipp, 2026-07-13): evaluate
 [vercel/chatbot](https://github.com/vercel/chatbot) as the starting point ONLY if it reduces
