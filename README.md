@@ -327,7 +327,8 @@ Every part of the system runs on a Vercel primitive. One Vercel project, three
 
 ```mermaid
 flowchart LR
-    CONN["connector<br/>(Workflows)"] -->|"watches (outbound ws · poll)"| W["the world<br/>Alpaca · SEC EDGAR"]
+    CONN["connector<br/>(Workflows)"] -->|"connects (ws) · polls"| W["the world<br/>Alpaca · SEC EDGAR"]
+    W -->|"ticks · fills · filings"| CONN
     CONN -->|"event fired"| Q["Queues"]
     Q -->|"wake"| EVE["agent + catalog<br/>(Functions)"]
     CONN -.-> R[("Redis")]
