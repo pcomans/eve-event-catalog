@@ -99,6 +99,33 @@
         "durability": "in-process poller; lost on server restart"
       },
       "onWake": "Report the filing conversationally: form type (payload.snapshot.form), company (payload.snapshot.company), filing date (payload.snapshot.filingDate), and the accession number (payload.snapshot.accessionNumber); include the link (payload.snapshot.url) if useful. No re-check is needed — unlike a price level, a published SEC filing is immutable, so there's nothing to re-verify before reporting it."
+    },
+    {
+      "provider": "clock",
+      "event": "time.at",
+      "status": "active",
+      "description": "Fires once at a specific future moment YOU choose — for waking yourself up on your own schedule instead of waiting on an external event or relying on a user/cron to intervene (e.g. \"wake me when markets open Monday\"). Set `params.at` to an ISO-8601 datetime string WITH AN EXPLICIT UTC OFFSET (Z is recommended; a bare offset-less datetime like \"2026-07-14T09:30:00\" is rejected, since there is no fixed server timezone to assume). Rejected at subscribe time if `at` is missing its offset, isn't a real calendar date/time, or isn't strictly in the future. Set `resource` to any short label for what you're waiting on (e.g. \"market-open\") — the clock provider itself doesn't use it operationally.",
+      "params": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "string",
+            "futureDatetime": true,
+            "description": "ISO-8601 datetime string WITH AN EXPLICIT OFFSET for when this should fire, e.g. \"2026-07-14T09:30:00Z\" or \"2026-07-14T09:30:00-04:00\". Z is recommended. Must be strictly in the future."
+          }
+        },
+        "required": ["at"],
+        "additionalProperties": false
+      },
+      "tags": ["timer", "clock", "schedule", "time", "wake", "self-scheduled"],
+      "metadata": {
+        "freshness": "exact",
+        "latency": "~0 (in-process timer)",
+        "auth": "none",
+        "cost": "free",
+        "durability": "in-process timer; lost on server restart"
+      },
+      "onWake": "This is the timer YOU set — it is not an external event, so nothing about the world necessarily changed just because this fired. Time has passed since you subscribed: re-check whatever you were actually waiting on (prices, positions, filings, anything else relevant) before acting on it. Do not assume anything you believed true at subscribe time still holds now."
     }
   ]
 }

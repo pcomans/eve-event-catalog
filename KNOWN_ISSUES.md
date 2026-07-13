@@ -176,3 +176,41 @@ so fault-injection tests need sustained failures, not single-shot throws.
   and resolves it itself from catalog.json (AGENTS.md rule 4). `GET /catalog/subscriptions` and
   `GET /catalog/events` remain open, unauthenticated, read-only (see #7's cross-instance dedup
   note, still relevant to the wake-delivery race this entry originally described).
+
+## 14. A library module (`catalog/catalog.ts`) gets evaluated more than once per process — its module-level state is NOT a singleton across every code path
+
+Found 2026-07-12 while adding the clock provider: a runtime-dependent check (`clock.time.at`'s
+`at` must be a real, future datetime — Ajv's static JSON Schema can't express that) was first
+implemented as an optional `Provider.validateParams` hook, called from `subscribe()` via
+`getProvider(input.provider)`. It passed every isolated `node:test` run cleanly, but a live
+end-to-end check through the real `subscribe_event` tool showed a subscription with a datetime
+**12 days in the past** get silently accepted. Debug logging (a `Math.random()`-tagged identity
+stamped on the module-scope `providers` Map) proved the cause: `catalog.ts` is evaluated as
+**at least three separate module instances** in one running dev server — two before
+`[DEV] server listening`, a third after — each with its own independent, empty-until-populated
+`providers` Map. `assertCatalogHonesty()` and `arm()`/`disarm()` dispatch always looked correct
+because they run in whichever instance also ran the provider-registering imports
+(`agent/channels/catalog.ts`'s side-effecting imports of `alpaca.ts`/`edgar.ts`/`clock.ts`) — but
+`subscribe()`, invoked from a tool's `execute()`, does not reliably run in that same instance, so
+`hasProvider()`/`getProvider()` calls made from inside `subscribe()` cannot be trusted to see
+what registered elsewhere.
+
+**The rule this project settled on**: never make `subscribe()` (or anything invoked from a
+tool's `execute()`) depend on the `providers` registry, or any other module-level state populated
+by a side-effecting import elsewhere. A constraint that must be enforced at `subscribe()` time
+has to be self-contained — expressed as data in `catalog.json` and checked by something with no
+cross-module dependency, e.g. an Ajv custom keyword (`ajv.addKeyword` in `catalog/catalog.ts`;
+see the `futureDatetime` keyword backing `clock.time.at`'s `at` field). This generalizes: catalog
+entries needing more subscribe-time constraints later should add more such self-contained
+keywords, not another registry-dependent hook. Full debug trail (the three-instance evidence) is
+in this session's transcript, not preserved in git history since the debug logging was removed
+before committing.
+
+**A second concrete instance (Codex clock-gate review, 2026-07-12, not yet fixed):**
+`catalog/providers/alpaca-client.ts`'s `testFeedTrades` Map (populated by `alpaca.ts`'s
+`ALPACA_DATA_FEED=test` tick handler, read by `getLatestTrade`) has the exact same shape of bug:
+`get_latest_price`'s tool `execute()` can read an empty `testFeedTrades` in whatever module
+instance IT runs in, and falsely report "no test-feed trade observed yet" even while the FAKEPACA
+stream is actively ticking in the main process's instance. Not fixed now — the real fix is
+Phase 2's provider extraction (moving providers out of this same-process, multi-instance-prone
+arrangement entirely), not a patch here.

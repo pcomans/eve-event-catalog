@@ -180,6 +180,11 @@ test("assertCatalogHonesty passes once every active event type has a registered,
     arm: async () => {},
     disarm: async () => {},
   });
+  registerProvider("clock", {
+    supportedEvents: ["time.at"],
+    arm: async () => {},
+    disarm: async () => {},
+  });
   assert.doesNotThrow(() => assertCatalogHonesty());
 });
 

@@ -1,4 +1,4 @@
-import Ajv, { type ValidateFunction } from "ajv";
+import Ajv, { type ErrorObject, type SchemaValidateFunction, type ValidateFunction } from "ajv";
 
 import type { EventType, Subscription } from "./types.ts";
 import { createSubscription, type NewSubscriptionInput } from "./registry.ts";
@@ -26,6 +26,106 @@ export const EVENT_TYPES = catalogData.eventTypes as EventType[];
 // Compiled once at load time, keyed by "provider.event" — the same schema
 // search_events shows the model is the one enforced in subscribe().
 const ajv = new Ajv({ allErrors: true });
+
+// Custom keyword for the one class of constraint static JSON Schema can't
+// express: a rule that depends on the CURRENT moment, not just the shape of
+// the data — e.g. clock.time.at's `at` needing to be a real, parseable, and
+// (right now) still-future datetime. Kept entirely inside Ajv (no
+// dependency on the providers registry below) deliberately: an earlier
+// version of this check lived on a Provider.validateParams hook, called
+// from subscribe() via getProvider() — but eve's runtime evaluates this
+// module more than once across its own bundling/sandboxing contexts, each
+// with its OWN independent `providers` Map, and subscribe() doesn't
+// reliably run in the same instance that ran the provider-registering
+// imports (agent/channels/catalog.ts's side-effecting imports of
+// alpaca.ts/edgar.ts/clock.ts). Ajv validators, compiled from catalog.json
+// alone with no cross-module state, don't have that problem — found via a
+// live end-to-end check (a past `at` was silently accepted through the real
+// subscribe_event tool despite passing red-green in isolated node:test
+// runs); see git history for the debug trail.
+// Requires an EXPLICIT offset (Z or ±HH:MM) — `new Date("2026-07-13T09:30:00")`
+// (no offset) silently parses as *local time to the server*, which is a
+// trap for a distributed system with no fixed server timezone. Captures the
+// wall-clock components separately from the offset so they can be
+// round-trip-validated below (JS silently normalizes an impossible date
+// like 2026-02-30 into March 2 instead of rejecting it).
+const ISO_DATETIME_NO_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/;
+// The offset itself is range-constrained (00-14 hours, 00-59 minutes —
+// covers every real-world UTC offset, -12:00 to +14:00) rather than
+// accepting any two digits: an unconstrained `\d{2}:\d{2}` matches garbage
+// like "+99:99", which `new Date()` turns into a non-finite (NaN) instant
+// — and NaN <= Date.now() is always false, so the "must be in the future"
+// check below would never trip and silently let it through.
+const ISO_DATETIME_WITH_OFFSET =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](?:0\d|1[0-4]):[0-5]\d)$/;
+
+function setKeywordError(message: string): void {
+  futureDatetimeValidate.errors = [{ message } as Partial<ErrorObject>];
+}
+
+const futureDatetimeValidate: SchemaValidateFunction = (schemaValue: unknown, data: unknown): boolean => {
+  if (!schemaValue) return true;
+
+  if (typeof data !== "string") {
+    setKeywordError("is not a valid ISO-8601 datetime string");
+    return false;
+  }
+  if (ISO_DATETIME_NO_OFFSET.test(data)) {
+    setKeywordError(`must include an explicit UTC offset, e.g. "${data}Z"`);
+    return false;
+  }
+  const match = ISO_DATETIME_WITH_OFFSET.exec(data);
+  if (!match) {
+    setKeywordError('is not a valid ISO-8601 datetime string (with explicit offset, e.g. "2026-07-13T13:30:00Z")');
+    return false;
+  }
+
+  // Round-trip the wall-clock components through Date.UTC and back: JS
+  // normalizes an out-of-range field (e.g. day 30 in February) instead of
+  // rejecting it, so a value that doesn't survive the round trip unchanged
+  // was never a real calendar date/time to begin with.
+  const [, yearStr, monthStr, dayStr, hourStr, minuteStr, secondStr] = match;
+  const year = Number(yearStr);
+  const month = Number(monthStr);
+  const day = Number(dayStr);
+  const hour = Number(hourStr);
+  const minute = Number(minuteStr);
+  const second = Number(secondStr);
+  const roundTripped = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  const survivedRoundTrip =
+    roundTripped.getUTCFullYear() === year &&
+    roundTripped.getUTCMonth() === month - 1 &&
+    roundTripped.getUTCDate() === day &&
+    roundTripped.getUTCHours() === hour &&
+    roundTripped.getUTCMinutes() === minute &&
+    roundTripped.getUTCSeconds() === second;
+  if (!survivedRoundTrip) {
+    setKeywordError(`"${data}" is not a real calendar date/time (a field is out of range, e.g. day 30 in February)`);
+    return false;
+  }
+
+  // Paranoid catch-all: even with the offset range constrained above, a
+  // non-finite instant must never silently pass — NaN <= Date.now() is
+  // always false, which would otherwise read as "not in the past."
+  const instant = new Date(data).getTime();
+  if (!Number.isFinite(instant)) {
+    setKeywordError(`"${data}" does not parse to a valid instant`);
+    return false;
+  }
+  if (instant <= Date.now()) {
+    setKeywordError("must be strictly in the future");
+    return false;
+  }
+  return true;
+};
+
+ajv.addKeyword({
+  keyword: "futureDatetime",
+  schemaType: "boolean",
+  errors: true,
+  validate: futureDatetimeValidate,
+});
+
 const validators = new Map<string, ValidateFunction>(
   EVENT_TYPES.map((eventType) => [`${eventType.provider}.${eventType.event}`, ajv.compile(eventType.params)]),
 );

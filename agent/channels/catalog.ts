@@ -21,6 +21,7 @@ import { listEvents } from "#catalog/history.ts";
 // below is guaranteed to see both.
 import "#catalog/providers/alpaca.ts";
 import "#catalog/providers/edgar.ts";
+import "#catalog/providers/clock.ts";
 
 // The catalog channel owns the demo conversation: it starts each session on a
 // stable, caller-chosen `conversationId` and later "wakes" it by sending
