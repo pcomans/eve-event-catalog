@@ -64,6 +64,16 @@ reporting success to the OTel pipeline — no error, no log. The var is provisio
 env store (development) as of 2026-07-11, so `vercel env pull` includes it; if traces ever stop
 appearing, check this var first.
 
+**Second silent-stop mode (hit 2026-07-12): the LangSmith monthly quota.** When the org
+exhausts its unique-traces limit, ingest returns 429 ("tenant exceeded usage limits: Monthly
+unique traces usage limit exceeded") — the exporter treats it as retryable and the spans
+silently vanish, while dashboard READS keep working, so the project just looks frozen at the
+last ingested run. Config-side debugging is wasted here. Quick check:
+`curl -X POST https://api.smith.langchain.com/api/v1/runs -H "x-api-key: $LANGSMITH_API_KEY"
+-H 'content-type: application/json' -d '{"id":"<uuid>","name":"quota-probe","run_type":"chain",
+"start_time":"<now>","session_name":"eve-events"}'` — a 429 with that message is the answer;
+fixing it is a plan/billing action in LangSmith, not a code change.
+
 ## 7. A wake POSTed from inside `turn.completed` races session parking — and eve handles it correctly
 
 `emitTurnEpilogue` (eve's compiled `harness/emission.js`) awaits the `turn.completed` emit — which
