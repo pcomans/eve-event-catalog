@@ -271,3 +271,22 @@ connector is receiving FAKEPACA ticks, and price-wake guidance tells the agent t
 that fresh-price check before acting. The IEX path is unaffected (REST). Fix tracked for
 post-merge, before Phase 6's cloud E2E (task #27): fall back to the connector's Redis-persisted
 per-symbol latest price (`gap-replay-cursor`) when in connector mode.
+
+## 15. `workflow@4.6.0`'s `start()` cannot be called directly in a `"use workflow"` body — and its own retries can fork the "run forever" chain
+
+Found 2026-07-13 on real infra (preview deployment), running `connector/workflows/sleep-resume-smoke-test.ts` to verify gate 7's `start(self, [state])` recursion shape (the SDK's only "run forever" primitive — no `continueAsNew`). Two distinct bugs, found in sequence:
+
+1. **`start()` must be called from inside its own `"use step"` function, never directly in the `"use workflow"` body.** Calling it at the workflow's top level (as gate 7's own research and this project's first connector skeleton both did) throws at runtime: `Error: The workflow environment doesn't allow this runtime usage of start. Move this call to a step function ("use step") or call it outside the workflow context.` The `workflow/api` module's `start`/`getRun`/etc. exports are unconditional stubs that always throw this — the real implementation is only wired in for step-context or outside-workflow (e.g. route-handler) call sites, not the workflow body itself. Fix: wrap the call —
+   ```ts
+   async function startNextRun(nextState: State): Promise<void> {
+     "use step";
+     await start(selfWorkflow, [nextState]);
+   }
+   ```
+   Applied in both `sleep-resume-smoke-test.ts` and the real `market-data-session.ts`.
+
+2. **A step's return value must be JSON-serializable — the `Run` object `start()` resolves to is not.** Returning it directly from a `"use step"` function (e.g. to log `chained.runId`) fails with `[Workflow] Serialization failed { context: 'step return value', problematicValue: Run { ..., world: { ...AsyncFunctions... } } }`. Fix: extract only the primitive fields you need (`{ runId: run.runId }`), never return the `Run` instance itself.
+
+   **Sharper and more important finding riding along with #2**: while retrying against that serialization failure, the step actually called `start()` again on every retry — 4 retries produced 4 distinct downstream `wrun_...` run IDs before the step gave up as `FatalError: ... exceeded max retries`. `start()` has no idempotency-key option (checked `StartOptions`'s full shape: `world`, `specVersion`, `deploymentId` only). **This means any step wrapping a chaining `start()` call is not safely retryable as written** — if it ever fails for a transient reason after `start()` has already succeeded (not just this now-fixed serialization bug), the retry forks a second, redundant "forever" chain running in parallel with the first. Not fixed here (the smoke test's fix avoids retries by not failing at all); flagged for whoever hardens `market-data-session.ts`'s own `startNextRun` — worth an explicit "has this run already been chained" check (e.g. a Redis flag keyed by the parent runId) before calling `start()` again on retry, or confirming from Vercel whether a future SDK version adds an idempotency key.
+
+**Why this matters for Phase 3**: the *sleep/resume* mechanism itself is NOT what failed — the smoke test's first (pre-fix) run survived 6×30s sleeps plus one full 35-minute sleep (past vercel/workflow issue #634's reported ~30-minute trouble spot) without incident, and only failed afterward on the unrelated `start()` bug above. That's a positive signal for using durable `sleep()` for Phase 3's expiry timers rather than falling back to a sorted-set sweep — the sweep alternative would still be worth keeping in mind for whatever workaround #2's forking risk needs, though.

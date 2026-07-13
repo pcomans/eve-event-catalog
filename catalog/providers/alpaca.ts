@@ -13,7 +13,7 @@ import { registerProvider, type Provider } from "../catalog.ts";
 import { deliverWake } from "../wake.ts";
 import { logCatalog } from "../log.ts";
 import { crosses, type CrossingDirection } from "./crossing.ts";
-import { alpacaClient, getLatestTrade, getOrder, normalizeOrder, recordTestFeedTrade, type AlpacaOrder, type DataFeed } from "./alpaca-client.ts";
+import { alpacaClient, describeAuthFailure, getLatestTrade, getOrder, normalizeOrder, recordTestFeedTrade, type AlpacaOrder, type DataFeed } from "./alpaca-client.ts";
 
 // ALPACA_DATA_FEED=test switches the shared market-data stream (and,
 // implicitly, seeding behavior below) to Alpaca's 24/7 synthetic FAKEPACA
@@ -198,11 +198,13 @@ function orderSnapshot(order: AlpacaOrder): Record<string, unknown> {
   };
 }
 
-/** Formats a stream authentication failure for a thrown Error message. Pure. */
-export function describeAuthFailure(label: string, result: streaming.StreamAuthResult): string {
-  const code = result.code !== undefined ? ` code=${result.code}` : "";
-  return `${label} stream authentication failed: status=${result.status}${code} message=${result.message}`;
-}
+// describeAuthFailure lives in alpaca-client.ts now (the connector's own
+// stream wiring, connector/lib/alpaca-session.ts, needs it too, and
+// importing THIS file for one pure helper would pull in registerProvider()
+// and every module-level Map below into a process that never uses them) —
+// re-exported here (of the binding already imported above) so existing
+// imports/tests in this file are unaffected.
+export { describeAuthFailure };
 
 const TERMINAL_ORDER_STATUSES = new Set(["filled", "canceled", "rejected", "expired"]);
 // trade_updates event names, not order statuses — "fill" (not "filled") is
