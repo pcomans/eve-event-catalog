@@ -215,9 +215,13 @@ Phase 1 Codex gate).
   research, pick watches (price crossings both directions now meaningful, EDGAR filings as
   signals), size positions, realize P&L, always leave a subscription armed (the campaign must
   never dead-end with nothing watched). Keep the identity-only prompt discipline from task #10.
-- **Tavily web search tool** (user-approved external service): one defineTool wrapping Tavily's
-  search API (check current API + pricing; env TAVILY_API_KEY) so the agent can research before
-  trading. Subject-matter tool like Alpaca, not infrastructure.
+- **Web search: eve's built-in `web_search` (DECIDED 2026-07-12, Philipp: "provider supplied web
+  search is fine, no need for tavily").** eve's default harness ships `web_search` as a
+  provider-managed tool (the model provider executes it; no local executor). VERIFY EARLY in
+  Phase 4 that it actually resolves through AI Gateway + DeepSeek V4-Pro — provider-managed
+  means provider-dependent, and DeepSeek has no known native search backend. If it doesn't work,
+  the recorded fallback is the previously-approved Tavily defineTool override (eve's documented
+  path for exactly this gap); only then does TAVILY_API_KEY come back.
 - **Campaign lifecycle**: an eve schedule (agent/schedules/) opens the market day — wakes the
   campaign conversation with a "market's open, review and act" turn; the event catalog does the
   intraday waking. Decide in design: one perpetual conversation vs daily conversations linked by
@@ -233,7 +237,7 @@ Read-only; no secrets rendered; rate limiting if trivially available. This is th
 face — presentation quality matters (the audience is a Vercel engineer).
 
 **Phase 6 — production deploy + cloud E2E + campaign launch.** Promote env vars to production
-(incl. new secrets: CATALOG_API_SECRET, TAVILY_API_KEY), deploy, re-verify KNOWN_ISSUES #7 on
+(incl. new secret: CATALOG_API_SECRET; TAVILY_API_KEY only if the Phase 4 web_search fallback was needed), deploy, re-verify KNOWN_ISSUES #7 on
 world-vercel (hard gate for trusting arming in prod), then the full cloud E2E during market
 hours: subscribe → park → real cross → wake → autonomous trade → fill wake → all visible on the
 public site. Twice. Then launch the standing campaign, observe one full unattended market day

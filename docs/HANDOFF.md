@@ -85,4 +85,7 @@ Read `docs/plan-vercel-production.md` and execute Phases 0→6, authoring **AT-1
 (`docs/acceptance-tests.md`) FIRST (tests-before-build applies to acceptance criteria). Before any
 live/demo work: `vercel env pull` with the dev server DOWN (OIDC ~12h; the pull OVERWRITES
 `.env.local`), fresh conversation ids. New secrets to promote to Vercel prod when their phase
-lands: `CATALOG_API_SECRET`, `TAVILY_API_KEY`, `AI_GATEWAY_API_KEY` (local only).
+lands: `CATALOG_API_SECRET` (provisioned in dev scope 2026-07-12; promote to prod in Phase 6),
+`AI_GATEWAY_API_KEY` (local only). Tavily was dropped 2026-07-12 — eve's built-in
+provider-managed `web_search` instead; `TAVILY_API_KEY` only returns if the Phase 4 fallback
+is needed (see plan Phase 4).

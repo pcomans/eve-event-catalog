@@ -133,7 +133,7 @@ never during one.
 
 AT-10…AT-14 are the acceptance criteria for the everything-on-Vercel build, **authored before the
 build** (tests-before-build applies to acceptance criteria). Additional prerequisites: Vercel Pro
-project, `CATALOG_API_SECRET` (new), `TAVILY_API_KEY` (new), `AI_GATEWAY_API_KEY` (local dev
+project, `CATALOG_API_SECRET` (new), `AI_GATEWAY_API_KEY` (local dev
 only — prod uses AI Gateway OIDC). Where a step says "test suite covers it", the referenced
 red-green node:test tests must exist and be green in `pnpm test` — the checkbox is the manual
 spot-check on top.
@@ -213,7 +213,10 @@ socket sessions). Runnable locally (same runtime in-process) except where marked
        `deepseek-chat` / `deepseek-reasoner` appear nowhere in code or env (they deprecate
        2026-07-24 and would break the campaign mid-run).
 4. [ ] **Research tool**: ask the agent (private chat) to evaluate a trade idea — the stream
-       shows a Tavily search call before any order; the tool returns real results.
+       shows a `web_search` call before any order (eve's built-in, provider-managed) and the
+       tool returns real results through AI Gateway + DeepSeek V4-Pro. If the provider never
+       executes it, this step FAILS and the recorded fallback (Tavily defineTool override)
+       kicks in — the criterion is working research, not a specific vendor.
 5. [ ] **The campaign never dead-ends**: after any completed campaign turn, at least one
        subscription is armed. Test both paths: (a) agent behavior — a turn in which everything
        fired/expired ends with the agent arming something new; (b) the market-open schedule
