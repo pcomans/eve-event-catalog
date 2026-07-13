@@ -159,6 +159,8 @@ function makeSub(id: string, resource: string, armedAt = ARMED_AT): Subscription
     armedAt,
     firedAt: null,
     lastError: null,
+    deliverReason: null,
+    deliverSnapshot: null,
   };
 }
 

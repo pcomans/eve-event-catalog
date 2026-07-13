@@ -129,7 +129,37 @@ oversight:
   breaking changes between alpha patch versions are possible; re-verify `pnpm test` +
   `pnpm typecheck` after any alpha version bump.
 
-## 11. Assorted
+## 11. Stop the dev server before running `pnpm test`
+
+Since Phase 1 (2026-07-12), a booted server runs its own delivery-recovery sweep
+(`startRecoverySweep`, `agent/channels/catalog.ts`) against the same shared Upstash Redis the
+tests use. A dev server left running during `pnpm test` is a second, unstubbed process: its
+sweep steals test subscriptions' delivery leases and — because test subscriptions have no
+conversation record — its real loopback wake POSTs 404 and mark those rows `failed` under the
+tests' feet. Symptom: intermittent (~30–50%) liveness failures in the `sweepStrandedDeliveries`
+tests that never reproduce solo and look like Redis flakiness. It isn't; kill the server first.
+(Found by the Phase 1 Codex gate after a long rate-limit goose chase.)
+
+## 12. Upstash Lua: `cjson.null` is indistinguishable from `nil` — null fields silently vanish
+
+In Upstash's EVAL sandbox (verified experimentally 2026-07-12, Phase 1), `t.field = cjson.null`
+behaves exactly like `t.field = nil`: the key simply doesn't exist afterward (`pairs()` never
+sees it), even on a table that was never `cjson.decode`d. Consequence: any decode → mutate →
+re-encode round trip in a Lua script silently DROPS every null-valued JSON field — `lastError`,
+`firedAt`, an unset `deliverReason` — persisting records whose nulls have become missing keys
+(`undefined` on the JS side). A second, related trap: cjson decodes `{}` and `[]` to the same
+empty Lua table and re-encodes it as `[]`, so `params: {}` comes back an *array*.
+
+**The rule this project settled on (after a sentinel-string workaround was itself gate-failed
+for data-corruption edge cases): never round-trip a stored JSON record through cjson at all.**
+Do the read, guard checks, and JSON construction in TypeScript, and keep Lua down to a raw
+string compare-and-swap (`if GET==ARGV[1] then SET ARGV[2]`) with a bounded JS retry loop — see
+`tryTransitionToDelivering` in `catalog/registry.ts`. Two practicalities: read the expected
+value byte-exact with a second client (`Redis.fromEnv({ automaticDeserialization: false })`),
+never parse→re-stringify it; and remember `@upstash/redis` auto-retries failed commands (~5×),
+so fault-injection tests need sustained failures, not single-shot throws.
+
+## 13. Assorted
 
 - The dev server listens on port **2000**, not 3000 as eve's own docs curl examples suggest.
 - Local durable workflow state lives in `.workflow-data/` (gitignored). If sessions look stuck
@@ -137,10 +167,12 @@ oversight:
   active subscriptions in Redis survive, but their parked sessions do not; re-subscribe.
 - Live IEX market data only flows during US market hours (9:30–16:00 ET, Mon–Fri). Off-hours,
   price subscriptions arm but never fire, and notional market orders won't fill.
-- `POST /catalog/wake` is unauthenticated, consistent with this POC's local-only,
-  no-cross-instance-auth scope (see #7's cross-instance dedup note). `guidance` itself can't be
-  spoofed this way — the route rejects (400) any request that supplies one and resolves it
-  itself from catalog.json (AGENTS.md rule 4) — but `payload`/`subscribedAt`/`firedAt` remain
-  caller-suppliable, and a caller who knows a real `subscriptionId` could trigger an early/fake
-  wake for it. Hardening this route (e.g. a shared secret) is a separate, out-of-scope concern
-  for the demo.
+- **Superseded 2026-07-12 (Phase 1, AT-10)**: `POST /catalog/chat` and `POST /catalog/wake` now
+  require `authorization: Bearer $CATALOG_API_SECRET` (`catalog/auth.ts`; checked in
+  `agent/channels/catalog.ts` before any session-touching code runs) — the server refuses to
+  boot without the secret configured (`assertCatalogApiSecretConfigured`). `payload`/
+  `subscribedAt`/`firedAt` are still caller-suppliable to anyone holding the secret (unchanged),
+  and `guidance` still can't be spoofed — the route rejects (400) any request that supplies one
+  and resolves it itself from catalog.json (AGENTS.md rule 4). `GET /catalog/subscriptions` and
+  `GET /catalog/events` remain open, unauthenticated, read-only (see #7's cross-instance dedup
+  note, still relevant to the wake-delivery race this entry originally described).

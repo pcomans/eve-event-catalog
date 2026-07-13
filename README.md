@@ -32,13 +32,15 @@ the agent itself.
 
 ```mermaid
 flowchart LR
-    U["User"] -->|"Buy when..."| A["Agent<br/>durable eve session"]
-    A -->|"1. Search and subscribe"| C["Event Catalog<br/>validated events + subscriptions"]
-    C -->|"2. Watch"| P["External services<br/>Alpaca · SEC EDGAR"]
-    P -->|"3. Condition met"| C
-    C -->|"4. Wake same conversation"| A
-    A -->|"5. Re-check and act"| P
-    A -->|"6. Report"| U
+    U["User"] -->|"chat — bearer secret"| A["Agent<br/>durable eve session"]
+    A -->|"1. search + subscribe"| C["Event Catalog<br/>validated events + subscriptions"]
+    C -->|"2. watch"| P["External services<br/>Alpaca · SEC EDGAR"]
+    P -->|"3. condition met"| C
+    C -->|"4. wake the same conversation<br/>leased delivery, deduped per subscription"| A
+    A -->|"5. re-check and act"| P
+    A -->|"6. report"| U
+    C <--> R[("Upstash Redis<br/>subscriptions · delivery leases · event history")]
+    R -.->|"public, read-only"| O["GET /catalog/subscriptions<br/>GET /catalog/events"]
 ```
 
 There are five main pieces:
@@ -47,11 +49,17 @@ There are five main pieces:
   tools instead of knowing how every external API works.
 - **`catalog/catalog.json`** is the menu of events. Each entry describes the event, its input
   schema, provider characteristics, and what the agent should do after waking.
-- **The registry** stores subscriptions and conversation addresses in Upstash Redis.
+- **The registry** stores subscriptions, conversation addresses, delivery leases, and an
+  append-only event history in Upstash Redis.
 - **Providers** do the watching. Alpaca uses shared WebSocket connections; EDGAR uses one shared
   polling loop per company because the SEC does not offer a push stream for filings.
 - **The wake path** resumes the existing eve session with the event data and catalog-authored
-  handling guidance.
+  handling guidance. Delivery is claimed through an expiring Redis lease, recovered by a sweep if
+  a process dies mid-delivery, and deduped per subscription so a one-shot wake is delivered once.
+
+Two routes write (`POST /catalog/chat`, `POST /catalog/wake`) and require
+`authorization: Bearer $CATALOG_API_SECRET`; two routes read (`GET /catalog/subscriptions`,
+`GET /catalog/events` — every lifecycle transition, newest first) and are public.
 
 This is not a replacement for a workflow engine. eve owns durable execution. The Event Catalog is
 the event-discovery and wake-up layer on top.

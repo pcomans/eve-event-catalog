@@ -60,6 +60,8 @@ export async function createSubscription(input: NewSubscriptionInput): Promise<S
     armedAt: null,
     firedAt: null,
     lastError: null,
+    deliverReason: null,
+    deliverSnapshot: null,
   };
   await writeSubscription(sub);
   return sub;
@@ -92,6 +94,98 @@ export async function updateSubscription(
   const updated: Subscription = { ...current, ...patch };
   await writeSubscription(updated);
   return updated;
+}
+
+// updateSubscription's read-then-write is NOT atomic — fine for most patches
+// (single writer per field in practice), but wrong for the armed/pending ->
+// delivering step: two callers racing on the same subscription (e.g. an
+// expiry timer and a provider tick) could both read a pre-transition
+// snapshot, and a delayed second write built from that stale read can
+// regress an already-terminal status back to "delivering", or silently
+// replace the deliverReason the first caller already established.
+//
+// tryTransitionToDelivering makes "is this still transitionable?" and
+// "transition it" atomic via raw-string compare-and-swap, NOT by decoding
+// and mutating the record inside Lua (an earlier version did that; see git
+// history) — Lua's cjson has two independent, confirmed-live corruption
+// modes on Upstash's actual sandbox that a decode/mutate/encode round trip
+// can't avoid: it decodes `{}` and `[]` to the identical empty table and
+// re-encodes an empty table as a JSON array (silently turning an empty
+// params/deliverSnapshot object into `[]`), and `cjson.null` isn't a real
+// sentinel there (assigning it to a table field deletes the key, same as
+// nil), which previously needed a string-marker workaround that itself
+// corrupted any real data value equal to the marker token. CAS sidesteps
+// cjson for the data entirely: the guard checks and the new record are
+// built in plain TypeScript (where `{}` and `null` behave exactly as
+// expected), and the Lua script's only job is a byte-exact string swap.
+//
+// This needs the RAW stored string (not the parsed object) for two things:
+// the CAS comparison must match byte-for-byte, and re-serializing a parsed
+// object would risk key-order/whitespace drift that could make an
+// unconditionally-correct write look like a CAS mismatch. `rawRedis` is a
+// second client instance (same credentials, `automaticDeserialization:
+// false`) purely so `.get()` returns the exact stored string instead of an
+// auto-parsed object.
+const rawRedis = Redis.fromEnv({ automaticDeserialization: false });
+
+const TERMINAL_STATUSES_FOR_TRANSITION = new Set<SubscriptionStatus>(["fired", "expired", "failed"]);
+
+// `if GET == ARGV[1] then SET ARGV[2] end` — the entire atomicity guarantee.
+// No cjson, no data touches Lua at all; ARGV[1]/ARGV[2] are opaque strings.
+const CAS_SCRIPT = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  redis.call("SET", KEYS[1], ARGV[2])
+  return 1
+else
+  return 0
+end
+`;
+
+/**
+ * Atomically transitions a subscription to "delivering", establishing
+ * `deliverReason`/`deliverSnapshot` — but only if it isn't already terminal
+ * and no earlier caller has already established a deliverReason. Returns
+ * the updated subscription if THIS call won the transition, or `null` if it
+ * lost (already terminal, or another caller already claimed the delivering
+ * intent first) — see the module comment above for why a plain
+ * updateSubscription() read-then-write isn't safe for this specific step.
+ *
+ * Reads raw, checks the guards in TS, builds the new record in TS, then
+ * swaps with a CAS keyed on the exact raw string just read. A CAS miss
+ * means someone else wrote the record between our read and our swap — the
+ * guards are re-checked against a fresh read (bounded to a few retries;
+ * realistic contention here is 2-3 callers at worst, never more).
+ */
+export async function tryTransitionToDelivering(
+  id: string,
+  reason: "fired" | "expired",
+  snapshot: Record<string, unknown> | null,
+): Promise<Subscription | null> {
+  const key = SUB_KEY(id);
+  const maxAttempts = 3;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const raw = await rawRedis.get<string>(key);
+    if (raw === null) return null; // subscription doesn't exist
+
+    const current = JSON.parse(raw) as Subscription;
+    if (TERMINAL_STATUSES_FOR_TRANSITION.has(current.status)) return null;
+    if (current.status === "delivering" && current.deliverReason) return null;
+
+    const updated: Subscription = {
+      ...current,
+      status: "delivering",
+      deliverReason: reason,
+      deliverSnapshot: snapshot,
+    };
+    const newRaw = JSON.stringify(updated);
+
+    const swapped = await redis.eval<[string, string], number>(CAS_SCRIPT, [key], [raw, newRaw]);
+    if (swapped === 1) return updated;
+    // CAS miss: retry with a fresh read — falls through to the next iteration.
+  }
+
+  return null; // exhausted retries under real contention; treat as lost, same as any other race loss
 }
 
 export async function listSubscriptions(): Promise<Subscription[]> {

@@ -4,10 +4,17 @@ import { getConversation, listSubscriptions, recordConversation } from "#catalog
 import {
   armPendingForConversation,
   buildWakeEnvelope,
+  claimWakeDelivery,
+  clearWakeClaim,
+  getWakeDeliveryMarker,
+  markWakeSent,
   rejectsCallerSuppliedGuidance,
   resolveGuidanceForWakeRequest,
+  startRecoverySweep,
 } from "#catalog/wake.ts";
 import { assertCatalogHonesty } from "#catalog/catalog.ts";
+import { assertCatalogApiSecretConfigured, isAuthorizedHeader } from "#catalog/auth.ts";
+import { listEvents } from "#catalog/history.ts";
 // Side-effecting imports: register the alpaca and edgar providers
 // (registerProvider(...)) at module load. ES module imports fully evaluate
 // before this file's own top-level code runs, so assertCatalogHonesty()
@@ -25,9 +32,31 @@ function log(line: string) {
   console.log(`[catalog] ${line}`);
 }
 
+// Fail-closed: refuses to boot rather than silently running the write
+// routes below unauthenticated (see AGENTS.md rule 4's assertCatalogHonesty
+// for the same pattern applied to the catalog).
+assertCatalogApiSecretConfigured();
+
+/**
+ * Shared-secret gate for the two write routes (POST /catalog/chat, POST
+ * /catalog/wake): `authorization: Bearer $CATALOG_API_SECRET`. Returns a 401
+ * Response to send back immediately — checked BEFORE any session-touching
+ * code runs, so a rejected request never calls `send()`. Read-only GETs
+ * (/catalog/subscriptions, /catalog/events) don't call this.
+ */
+function requireAuth(req: Request): Response | null {
+  const secret = process.env.CATALOG_API_SECRET!; // asserted present at boot, above
+  if (isAuthorizedHeader(req.headers.get("authorization"), secret)) return null;
+  log(`auth FAILED path=${new URL(req.url).pathname}`);
+  return Response.json({ error: "unauthorized: missing or invalid bearer token" }, { status: 401 });
+}
+
 export default defineChannel({
   routes: [
     POST("/catalog/chat", async (req, { send }) => {
+      const unauthorized = requireAuth(req);
+      if (unauthorized) return unauthorized;
+
       const { conversationId, message } = (await req.json()) as {
         conversationId: string;
         message: string;
@@ -73,6 +102,9 @@ export default defineChannel({
     // callers (expiry timers, provider ticks) call this same route over
     // HTTP rather than duplicating it.
     POST("/catalog/wake", async (req, { send }) => {
+      const unauthorized = requireAuth(req);
+      if (unauthorized) return unauthorized;
+
       const body = (await req.json()) as {
         conversationId: string;
         payload?: Record<string, unknown>;
@@ -84,12 +116,12 @@ export default defineChannel({
       };
 
       // guidance is the one field the agent is told to trust as instructions
-      // rather than data (see AGENTS.md rule 4). This route is
-      // unauthenticated, so accepting a caller-supplied guidance string
-      // would be a trusted-instruction injection vector — reject outright
-      // (loud 400, not a silent overwrite) rather than resolve it here from
-      // the subscription instead. wake.ts's deliverWake never sends this
-      // field; only subscriptionId + reason, below.
+      // rather than data (see AGENTS.md rule 4). Even with the bearer-secret
+      // gate above, accepting a caller-supplied guidance string would be a
+      // trusted-instruction injection vector for anyone holding the secret —
+      // reject outright (loud 400, not a silent overwrite) rather than
+      // resolve it here from the subscription instead. wake.ts's deliverWake
+      // never sends this field; only subscriptionId + reason, below.
       if (rejectsCallerSuppliedGuidance(body)) {
         log(`wake FAILED conv=${body.conversationId} reason=guidance-rejected`);
         return Response.json(
@@ -116,6 +148,36 @@ export default defineChannel({
         );
       }
 
+      // Route-side dedupe by subscriptionId (correctness prerequisite 4:
+      // "queue consumers dedupe by subscriptionId"), two-phase: claim the
+      // right to send BEFORE calling send() (phase "sending", short TTL,
+      // under a fresh owner token), upgrade to phase "sent" only after
+      // send() actually succeeds, via a token-CAS (see markWakeSent/
+      // clearWakeClaim's own comments in wake.ts — this route is the one
+      // place that actually knows whether send() succeeded, so it's the
+      // authoritative check; deliverWake's own marker check is only a fast
+      // path on top of this). A synthetic wake with no subscriptionId
+      // (AT-2) has no one-shot subscription to dedupe against and always
+      // proceeds, claim-free.
+      let claimToken: string | null = null;
+      if (subscriptionId) {
+        claimToken = await claimWakeDelivery(subscriptionId);
+        if (!claimToken) {
+          const marker = await getWakeDeliveryMarker(subscriptionId);
+          if (marker?.phase === "sent") {
+            log(`wake ALREADY-DELIVERED conv=${conversationId} subscriptionId=${subscriptionId}`);
+            return Response.json({ conversationId, subscriptionId, alreadyDelivered: true, firedAt: marker.firedAt });
+          }
+          // phase === "sending": another caller (or an earlier attempt of
+          // this same one, mid-crash-recovery) is actively sending this
+          // subscription's wake right now. Not an error — just nothing this
+          // call should also do; the claim's TTL bounds how long a truly
+          // stalled claim blocks a retry.
+          log(`wake ALREADY-IN-FLIGHT conv=${conversationId} subscriptionId=${subscriptionId}`);
+          return Response.json({ conversationId, subscriptionId, alreadyInFlight: true });
+        }
+      }
+
       // subscribedAt/firedAt overrides are explicit top-level request
       // fields (real subscriptions pass sub.armedAt and the exact instant
       // wake.ts already stored on the subscription, so Redis and the
@@ -132,12 +194,23 @@ export default defineChannel({
       const guidance = await resolveGuidanceForWakeRequest(subscriptionId, reason);
       const wakeMessage = `[event-catalog wake] ${JSON.stringify(buildWakeEnvelope(subscribedAt, firedAt, payload, guidance))}`;
 
-      const session = await send(wakeMessage, { auth: null, continuationToken: conversationId });
+      let session;
+      try {
+        session = await send(wakeMessage, { auth: null, continuationToken: conversationId });
+      } catch (err) {
+        // A genuine, caught send() failure — release the claim immediately
+        // so a retry doesn't have to wait out its TTL (a crash instead of a
+        // clean throw skips this entirely; the claim's own TTL recovers
+        // that case on the next sweep round — see clearWakeClaim's comment).
+        if (subscriptionId && claimToken) await clearWakeClaim(subscriptionId, claimToken);
+        throw err;
+      }
 
       // send() falls back to starting a brand-new session when it can't
       // deliver to the continuation token. Compare ids so that failure mode
       // is logged loudly instead of passing as a normal wake.
       if (session.id !== known.sessionId) {
+        if (subscriptionId && claimToken) await clearWakeClaim(subscriptionId, claimToken);
         log(
           `wake FAILED conv=${conversationId} expected=${known.sessionId} got=${session.id} reason=session-mismatch`,
         );
@@ -147,14 +220,55 @@ export default defineChannel({
         );
       }
 
+      // Upgraded only after send() has actually succeeded AND resumed the
+      // right session — see markWakeSent's doc comment in wake.ts for the
+      // honestly-accepted narrow window this two-phase design still leaves.
+      // If the upgrade itself fails (CAS miss, or the call throws — e.g. a
+      // transient Redis error), that is NEVER a reason to report this wake
+      // as failed: the agent's session already resumed successfully, which
+      // is the fact that matters. Log it loudly instead and let
+      // deliverWake's own terminal-status write (a separate step) handle
+      // reaching "fired"/"expired" — if THAT also fails, the subscription
+      // simply stays "delivering" and the next sweep round completes it.
+      let markerUpgradeFailed = false;
+      if (subscriptionId && claimToken) {
+        try {
+          const upgraded = await markWakeSent(subscriptionId, firedAt, claimToken);
+          if (!upgraded) markerUpgradeFailed = true;
+        } catch {
+          markerUpgradeFailed = true;
+        }
+        if (markerUpgradeFailed) {
+          log(
+            `wake MARKER-UPGRADE-FAILED conv=${conversationId} subscriptionId=${subscriptionId} session=${session.id} ` +
+              `— the wake WAS delivered to the agent; only the delivery marker's bookkeeping failed to upgrade`,
+          );
+        }
+      }
+
       log(`wake conv=${conversationId} session=${session.id} firedAt=${firedAt}`);
 
-      return Response.json({ conversationId, sessionId: session.id, firedAt });
+      return Response.json({
+        conversationId,
+        sessionId: session.id,
+        firedAt,
+        delivered: true,
+        ...(markerUpgradeFailed ? { markerUpgradeFailed: true } : {}),
+      });
     }),
 
     GET("/catalog/subscriptions", async () => {
       const subscriptions = await listSubscriptions();
       return Response.json(subscriptions);
+    }),
+
+    // Public, read-only, append-only event-history feed (AT-10): every
+    // subscription lifecycle transition and wake delivery, newest first.
+    // No auth — same openness as GET /catalog/subscriptions — and nothing
+    // in a history entry is a secret (catalog/history.ts).
+    GET("/catalog/events", async () => {
+      const events = await listEvents();
+      return Response.json(events);
     }),
   ],
 
@@ -177,3 +291,8 @@ export default defineChannel({
 // load, after the alpaca provider-registering import above has fully
 // evaluated (see that import's comment).
 assertCatalogHonesty();
+
+// Correctness prerequisite 4: recovers any subscription left stuck in
+// "delivering" by a crash between claiming the delivery lease and finishing
+// the wake POST. See catalog/wake.ts's sweepStrandedDeliveries.
+startRecoverySweep();

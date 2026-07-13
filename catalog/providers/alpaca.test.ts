@@ -21,6 +21,8 @@ function makeSub(id: string, resource: string): Subscription {
     armedAt: "2026-07-12T10:00:01.000Z",
     firedAt: null,
     lastError: null,
+    deliverReason: null,
+    deliverSnapshot: null,
   };
 }
 

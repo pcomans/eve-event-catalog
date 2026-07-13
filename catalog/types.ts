@@ -65,6 +65,16 @@ export interface Subscription {
   armedAt: string | null;
   firedAt: string | null;
   lastError: string | null;
+  /**
+   * The terminal transition ("fired"/"expired") a "delivering" subscription
+   * is mid-way through, persisted (not just held in a local closure) so a
+   * crash between claiming the delivery lease and POSTing the wake doesn't
+   * lose which transition to resume — the recovery sweep in wake.ts reads
+   * this back. Cleared once the transition actually completes.
+   */
+  deliverReason: "fired" | "expired" | null;
+  /** The snapshot that goes with deliverReason, for the same crash-recovery reason. */
+  deliverSnapshot: Record<string, unknown> | null;
 }
 
 /** The stable envelope a woken session receives, folded into a channel message. */

@@ -11,7 +11,8 @@ are broken; **read `KNOWN_ISSUES.md` first, always.**
 ## Commands
 
 - `pnpm dev` — dev server on port **2000** (not 3000)
-- `pnpm test` — node:test suite (hits live Redis; needs `.env.local`)
+- `pnpm test` — node:test suite (hits live Redis; needs `.env.local`; **stop the dev server
+  first** — its recovery sweep corrupts test state, see KNOWN_ISSUES #11)
 - `pnpm typecheck`
 - Manual test scripts per milestone: `docs/acceptance-tests.md` (AT-1 … AT-9)
 

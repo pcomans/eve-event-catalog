@@ -61,9 +61,10 @@ flowchart TB
 
     subgraph app["eve app — local dev server :2000"]
         subgraph channel["conversation API (an eve 'channel' — holds the resume keys)"]
-            CHAT["POST /catalog/chat"]
-            WAKE["POST /catalog/wake"]
+            CHAT["POST /catalog/chat 🔒"]
+            WAKE["POST /catalog/wake 🔒"]
             SUBS["GET /catalog/subscriptions"]
+            EVTS["GET /catalog/events"]
         end
 
         subgraph agent["Trading agent — durable eve session"]
@@ -104,6 +105,8 @@ flowchart TB
     WAKE -->|"send() resumes parked session"| LLM
     agent -.->|"spans"| LS
     User -->|"inspect"| SUBS
+    User -->|"history"| EVTS
+    EVTS --> REDIS
 ```
 
 </details>
@@ -127,9 +130,11 @@ Key moves, bottom to top:
   continuation token — same session, full memory, plus an envelope that makes time-passage
   explicit. Delivery loops back over HTTP into the conversation API (rather than an in-process
   call) because that component alone holds the resume keys — and it makes every
-  wake visible in the logs. The wake route is unauthenticated (local-only POC), which is exactly
-  why it *rejects* any caller-supplied guidance: the model-trusted instructions can only come
-  from `catalog.json`, resolved server-side. Event payloads are data, never instructions.
+  wake visible in the logs. The wake route (like chat) requires a shared bearer secret
+  (`CATALOG_API_SECRET`, checked before any session-touching code) — and it *still rejects* any
+  caller-supplied guidance, because even a secret-holder must not inject model-trusted
+  instructions: those can only come from `catalog.json`, resolved server-side. Event payloads
+  are data, never instructions.
 
 ## The demo flow
 
@@ -429,6 +434,39 @@ Shape for both consumers: **bounded loop of N steps inside a run (keep events < 
 `return await start(self, [cursor|state])`** — the connector chains socket-session steps with
 the cursor as carried state; the campaign chains tick/sleep rounds with a stop-check step each
 round.
+
+### Vercel Queues from Nitro (Phase 1 smoke test, resolved 2026-07-12)
+
+`@vercel/queue@0.4.0` (current on npm as of this date) `send()`/`handleCallback()` **round-trips
+cleanly from a Nitro route, locally, against the real Vercel Queue Service** — confirmed with a
+throwaway Nitro app (`spikes/vercel-queue-smoke/`, not part of the app): a `GET /send` route
+called `send("catalog-smoke-test", payload)`, which returned a real `messageId` from VQS; the
+dev-mode consumer received and processed that exact payload in-process within ~3s, observable
+via a second route. Two things worth knowing before Phase 2 builds on this:
+
+- **Nitro needs `registerDevConsumer`, not file-based `handleCallback` discovery.** The SDK's
+  local dev mode (`NODE_ENV=development`, no `VERCEL_DEPLOYMENT_ID`) normally auto-discovers
+  `handleCallback`-exported route handlers via `vercel.json`'s `experimentalTriggers` map — but
+  that convention is documented only for Next.js/Nuxt/SvelteKit. Nitro instead needs
+  `registerDevConsumer({ topic, client, handler })`, called once (e.g. in a Nitro plugin) —
+  TSDoc-only (not in the README), added for exactly this "central dispatcher" case. In
+  production, Vercel invokes the deployed route directly per `vercel.json`, so this is a dev-only
+  wrinkle, not a production concern.
+- **Nitro's own `serverDir` config defaults to `false`** (no automatic `routes/`/`plugins/`
+  directory scanning) — trivial once known, but silently 404s every route with no hint why until
+  set explicitly (`serverDir: "./"` for root-level `routes/`/`plugins/`, or `"./server"` for a
+  `server/` subdirectory).
+- **Minor peer-dependency lag**: `nitro@3.0.260610-beta` (the exact version eve vendors)
+  declares `@vercel/queue` as a `peerOptional` pinned to `^0.3.0`, one minor behind the `0.4.0`
+  actually on npm; `registerDevConsumer` exists in both, so this didn't block anything, but it
+  needed `--legacy-peer-deps`/`--force` to install both together and is worth re-checking when
+  nitro's peer range catches up.
+
+Not exercised (out of scope for a smoke test, and arguably untestable without a real deployment
+anyway): a genuine production-shape HTTP invocation of a `handleCallback`-wrapped route — Vercel
+constructs and sends that request itself in production, which is exactly why `registerDevConsumer`
+exists as the local stand-in. That remains a Phase 6 (`AT-14`) concern, alongside the rest of the
+world-vercel re-verification.
 
 ### Prior art — every layer exists somewhere, the stack exists nowhere
 

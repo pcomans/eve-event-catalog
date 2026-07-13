@@ -1,0 +1,13 @@
+{
+  "name": "vercel-queue-smoke",
+  "private": true,
+  "type": "module",
+  "description": "Phase 1 de-risk spike (docs/plan-vercel-production.md AT-10 #5) — NOT part of the app. Verifies @vercel/queue send()+handleCallback() round-trip from a Nitro route, locally. See its own README for the verdict.",
+  "scripts": {
+    "dev": "nitro dev"
+  },
+  "dependencies": {
+    "@vercel/queue": "0.4.0",
+    "nitro": "3.0.260610-beta"
+  }
+}
