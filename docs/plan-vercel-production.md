@@ -236,8 +236,12 @@ Phase 1 Codex gate).
   2026-07-13 after Philipp topped up $14 Gateway credit — BOTH paths work**, same correct cited
   answer (S&P 500 7,575.39 on 2026-07-10): (A) DeepSeek V4-Pro + `gateway.tools.parallelSearch`
   (1 search, Yahoo+Investing citations, richer detail) and (B) gpt-5.6-terra + OpenAI native
-  `web_search` (2 searches, AP citation). DECISION AT PHASE 4 KICKOFF (Philipp's): A keeps the
-  locked model pick and cheaper tokens; B is his search-quality lean. Either way: no Tavily, no
+  `web_search` (2 searches, AP citation). **DECIDED (Philipp, 2026-07-13, do not re-litigate):
+  path A — DeepSeek V4-Pro + `parallelSearch` wired as eve's `web_search` override.** Rationale:
+  original model pick, ~6–17× cheaper tokens than terra, half-price searches ($5 vs $10/1k),
+  probe answer equal-or-better. **Recorded escalation path**: if Parallel's search quality
+  disappoints on real research questions during the campaign, switch to gpt-5.6-terra + OpenAI
+  native `web_search` — a one-line model-id + tool change, no re-architecture. No Tavily, no
   new vendor; the eve-side work is one defineTool override.
 - **Campaign lifecycle**: an eve schedule (agent/schedules/) opens the market day — wakes the
   campaign conversation with a "market's open, review and act" turn; the event catalog does the
