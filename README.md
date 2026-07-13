@@ -291,21 +291,70 @@ Other current boundaries:
   a fixed dollar amount, valid for the trading day. There is no real-money endpoint in this
   repository.
 - The trading demo is fully autonomous within those bounds; it has no human approval step.
-- `/catalog/wake` is unauthenticated and intended only for this local POC. Someone who knows a live
-  subscription ID can trigger an early or fake wake and supply its data and timestamps. They cannot
-  inject trusted catalog guidance, but the endpoint is not production-hardened.
-- Delivery claims are single-process. A production, multi-instance version would move fired events
-  through a durable transport such as Vercel Queues and use cross-instance deduplication.
-- Nearly everything here maps to a Vercel primitive today; the one exception is holding a
-  long-lived outbound connection (the Alpaca websockets) — Vercel has no continuously-owned
-  connector runtime yet, so the watcher tier runs locally for now. The full production mapping,
-  the gap in precise terms, and where that primitive already exists are in
-  [`docs/architecture.md`](docs/architecture.md#deploying-to-vercel).
+- The two write routes (`POST /catalog/chat`, `POST /catalog/wake`) require
+  `authorization: Bearer $CATALOG_API_SECRET`, and the server refuses to boot without the secret
+  configured. A caller who holds the secret can still supply a wake's payload and timestamps —
+  but trusted catalog guidance can never come from the wire; it is resolved server-side.
+- Wake delivery is crash-safe and cross-process: claims are expiring Redis leases with owner
+  tokens, a recovery sweep resumes deliveries interrupted mid-flight, and every wake is deduped
+  per subscription, so a one-shot subscription wakes its conversation once even across crashes
+  and retries. The transport is still an in-process HTTP loopback; the deployed version moves it
+  onto Vercel Queues (see [Deploying to Vercel](#deploying-to-vercel)).
+- The one piece with no Vercel home *in this repo's current state* is holding a long-lived
+  outbound connection (the Alpaca websockets) — so the watcher tier runs in the dev process for
+  now. The deployment plan below closes exactly that gap.
 - Only conversations started through `/catalog/chat` can be woken. Other interfaces would need to
   hand the catalog their conversations' resume keys (eve's continuation tokens).
 
 See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) before changing eve channel code or troubleshooting a
 demo. It records the sharp edges found while building against eve 0.22.5 beta.
+
+## Deploying to Vercel
+
+Everything in this system maps to a Vercel primitive, and the deployment is being executed in
+phases (full plan: [`docs/plan-vercel-production.md`](docs/plan-vercel-production.md)). The
+target is **one Vercel project running three Vercel Services** with private bindings and one
+shared Upstash Redis:
+
+```mermaid
+flowchart TB
+    subgraph project["One Vercel project — three Vercel Services, private bindings"]
+        EVE["eve app — Nitro → Functions<br/>agent · catalog API · wake route 🔒"]
+        CONN["connector runtime — workflow pkg<br/>chained socket-session steps ·<br/>gap replay · EDGAR sweep · expiry"]
+        OBS["observatory — Next.js, public read-only<br/>equity · subscriptions · event feed ·<br/>full transcripts"]
+    end
+    Q["Vercel Queues<br/>wake delivery"]
+    R[("Upstash Redis<br/>registry · leases · cursors ·<br/>seen-sets · event history")]
+    W["Alpaca websockets/REST · SEC EDGAR"]
+    CONN -->|"watch (push + coalesced poll)"| W
+    CONN -->|"event fired"| Q
+    Q -->|"wake"| EVE
+    EVE <--> R
+    CONN <--> R
+    OBS --> R
+    OBS -->|"transcript replay"| EVE
+```
+
+- **eve app** deploys as an ordinary Vercel project: `eve build` emits Vercel Build Output when
+  `VERCEL` is set, and `vercel deploy` (not `--prebuilt`) puts the agent, catalog API, and the
+  authenticated wake route on Functions. Secrets live in the Vercel env store — the same store
+  local development already pulls from.
+- **The connector runtime** is the answer to "who holds the websocket": a sibling service on the
+  public `workflow` package, chaining bounded socket-session steps forever (each run re-invokes
+  itself — recursion across runs), with per-symbol cursors and historical gap replay so an
+  edge-triggered crossing that happens *between* sessions is still caught. EDGAR polling and
+  subscription expiry move onto durable timers in the same service.
+- **The observatory** is the public face: a read-only Next.js site rendering the campaign
+  (equity, positions), the live subscriptions table, the event feed (from the same
+  `GET /catalog/events` history this repo already writes), and full conversation transcripts.
+- **Wake delivery** rides Vercel Queues (at-least-once), which is why the delivery semantics in
+  this repo — leases, recovery sweep, per-subscription dedupe — were built queue-shaped from the
+  start: the Phase 1 code *is* the consumer-side correctness the queue needs.
+
+Deployment status: the delivery backbone (Phase 1) is complete and running locally with
+cloud-safe semantics; the connector service, durable timers, standing-mandate agent, observatory,
+and the production deploy itself are Phases 2–6 of the plan. Until Phase 6 lands, cloning this
+repo gets you the fully-working local system described above.
 
 ## Verification and observability
 
@@ -317,6 +366,9 @@ pnpm test
 ```
 
 `pnpm test` uses Node's built-in test runner and needs the Redis credentials in `.env.local`.
+**Stop the dev server first**: a running server's recovery sweep shares the same Redis and will
+corrupt test state from outside the test process
+([`KNOWN_ISSUES.md` #11](KNOWN_ISSUES.md#11-stop-the-dev-server-before-running-pnpm-test)).
 
 While the app runs, you can follow it at three levels:
 
