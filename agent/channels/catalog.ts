@@ -1,6 +1,11 @@
 import { defineChannel, GET, POST } from "eve/channels";
+import { context, propagation } from "@opentelemetry/api";
 
 import { getConversation, listSubscriptions, recordConversation } from "#catalog/registry.ts";
+// Lives under catalog/ (NOT here): eve discovery-scans agent/channels/ and
+// rejects any file that isn't a defineChannel() export — same trap as
+// AGENTS.md rule 7 for tests.
+import { OBSERVE_PAGE_HTML } from "#catalog/observe-page.ts";
 import {
   armPendingForConversation,
   buildWakeEnvelope,
@@ -33,6 +38,19 @@ function log(line: string) {
   console.log(`[catalog] ${line}`);
 }
 
+// Demo observatory fix, part 3 (2026-07-13, timeboxed — see
+// agent/instrumentation.ts's own comment for the full picture): stamps the
+// conversationId onto OTEL baggage for the duration of one send() call, so
+// every span created inside that call (AI SDK generation spans, tool
+// spans, etc.) inherits it via standard OTEL context propagation —
+// instrumentation.ts's ThreadMetadataSpanProcessor reads it back out and
+// turns it into the LangSmith run-metadata key ("session_id"/"thread_id")
+// Threads needs on every run in the trace, not just the root.
+function withConversationBaggage<T>(conversationId: string, fn: () => Promise<T>): Promise<T> {
+  const baggage = propagation.createBaggage({ conversation_id: { value: conversationId } });
+  return context.with(propagation.setBaggage(context.active(), baggage), fn);
+}
+
 // Fail-closed: refuses to boot rather than silently running the write
 // routes below unauthenticated (see AGENTS.md rule 4's assertCatalogHonesty
 // for the same pattern applied to the catalog).
@@ -63,7 +81,9 @@ export default defineChannel({
         message: string;
       };
 
-      const session = await send(message, { auth: null, continuationToken: conversationId });
+      const session = await withConversationBaggage(conversationId, () =>
+        send(message, { auth: null, continuationToken: conversationId }),
+      );
       await recordConversation(conversationId, session.id);
 
       log(`chat conv=${conversationId} session=${session.id}`);
@@ -197,7 +217,9 @@ export default defineChannel({
 
       let session;
       try {
-        session = await send(wakeMessage, { auth: null, continuationToken: conversationId });
+        session = await withConversationBaggage(conversationId, () =>
+          send(wakeMessage, { auth: null, continuationToken: conversationId }),
+        );
       } catch (err) {
         // A genuine, caught send() failure — release the claim immediately
         // so a retry doesn't have to wait out its TTL (a crash instead of a
@@ -270,6 +292,26 @@ export default defineChannel({
     GET("/catalog/events", async () => {
       const events = await listEvents();
       return Response.json(events);
+    }),
+
+    // Resolves a conversationId to its sessionId — used by the observatory
+    // page (below) so its Live Transcript panel can accept a conversationId
+    // and find the right session stream to poll. Public and read-only, same
+    // openness as the other GETs on this channel: a ConversationRecord has
+    // nothing secret in it (conversationId, sessionId, startedAt).
+    GET("/catalog/conversations/:conversationId", async (_req, { params }) => {
+      const record = await getConversation(params.conversationId);
+      if (!record) return Response.json({ error: "unknown conversationId" }, { status: 404 });
+      return Response.json(record);
+    }),
+
+    // The demo observatory (2026-07-13, timeboxed live-visibility tool while
+    // LangSmith was quota-dead): one self-contained, read-only HTML page —
+    // no secrets, no writes, only calls the public GETs above plus the
+    // existing session stream route. HTML/CSS/JS lives in observe-page.ts to
+    // keep this file's own route list readable.
+    GET("/catalog/observe", async () => {
+      return new Response(OBSERVE_PAGE_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
     }),
   ],
 

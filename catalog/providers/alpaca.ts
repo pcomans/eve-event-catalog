@@ -23,6 +23,27 @@ import { alpacaClient, getLatestTrade, getOrder, normalizeOrder, recordTestFeedT
 const FEED = (process.env.ALPACA_DATA_FEED ?? "iex") as DataFeed;
 const TEST_STREAM_URL = "wss://stream.data.alpaca.markets/v2/test";
 
+// p2v Codex gate finding 1 (2026-07-13): this file's in-process provider
+// and the connector's own parallel session (connector/lib/alpaca-session.ts)
+// were both opening independent websocket connections to the SAME Alpaca
+// account — violating AGENTS.md rule 3's "one connection per account"
+// constraint — and when the connector won a delivery's CAS, this file's own
+// in-process watch was never told: it kept a stream subscription open (and
+// kept polling toward re-seeding) for a subscription that had already gone
+// terminal. "One code path, two hosts" (docs/plan-vercel-production.md)
+// means exactly one of {this file, the connector} ever opens the account's
+// streams at a time. WATCHER_HOST picks which: "in-process" (default —
+// local dev is unchanged) keeps every function below exactly as it was;
+// "connector" makes arm()/disarm() pure registry-bookkeeping no-ops — the
+// provider stays registered (catalog.json's honesty check still passes;
+// subscribe()-time schema validation is untouched, since that runs
+// independent of arm()) but never opens a stream, seeds a price, or
+// registers trade_updates routing, because the connector's own session
+// (desired-membership.ts's readers + its own seedSymbolFromScratch) does
+// all of that independently, on its own discovery cadence. Read once at
+// module load, like every other env var here (KNOWN_ISSUES.md #2).
+const WATCHER_HOST = process.env.WATCHER_HOST === "connector" ? "connector" : "in-process";
+
 function log(line: string) {
   console.log(`[alpaca-stream] ${line}`);
 }
@@ -103,6 +124,8 @@ function handleTrade(trade: StreamTrade): void {
 }
 
 async function armPriceCross(sub: Subscription): Promise<void> {
+  if (WATCHER_HOST === "connector") return; // registry-only — see WATCHER_HOST's own comment above
+
   const direction: CrossingDirection = sub.event === "price.crossesBelow" ? "below" : "above";
   const symbol = sub.resource;
   const { threshold } = sub.params as { threshold: number };
@@ -135,6 +158,8 @@ async function armPriceCross(sub: Subscription): Promise<void> {
 }
 
 function disarmPriceCross(sub: Subscription): void {
+  if (WATCHER_HOST === "connector") return; // never armed anything here to tear down — see WATCHER_HOST's own comment above
+
   const state = priceSubs.get(sub.id);
   if (!state) return;
   priceSubs.delete(sub.id);
@@ -276,6 +301,8 @@ function unregisterOrderFilledSub(sub: Subscription): void {
 }
 
 async function armOrderFilled(sub: Subscription): Promise<void> {
+  if (WATCHER_HOST === "connector") return; // registry-only — see WATCHER_HOST's own comment above
+
   // Register — and make sure the trade_updates stream is authenticated AND
   // listening — BEFORE the REST seed check below, not after. If the order
   // went terminal while that REST call was in flight, its push event must
@@ -314,6 +341,8 @@ async function armOrderFilled(sub: Subscription): Promise<void> {
 }
 
 function disarmOrderFilled(sub: Subscription): void {
+  if (WATCHER_HOST === "connector") return; // never armed anything here to tear down — see WATCHER_HOST's own comment above
+
   unregisterOrderFilledSub(sub);
   maybeCloseTradingStream();
 }

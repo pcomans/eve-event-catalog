@@ -1,91 +1,102 @@
-# HANDOFF — read this first
+# HANDOFF — read this first (rewritten 2026-07-13, mid-demo-day)
 
-Entry point for the next session. Written 2026-07-12. The forward plan is
-`docs/plan-vercel-production.md` (self-contained); this doc is the *current state + decisions +
-open threads* on top of it. Also read `AGENTS.md` (hard rules) and `KNOWN_ISSUES.md` before any
-code. Project memory: `~/.claude/projects/-Users-philipp-code-event-catalogue/memory/`.
+Entry point for the next session. Read `AGENTS.md` (hard rules incl. NEW rule 9), `METHOD.md`
+(how the team works — updated with two postmortems), `KNOWN_ISSUES.md` (#11–#15 are recent and
+load-bearing) before touching anything. Plan: `docs/plan-vercel-production.md`. Project memory:
+`~/.claude/projects/-Users-philipp-code-event-catalogue/memory/`.
 
-## Where we are
+## Where we are (big picture)
 
-- **Local POC is complete, Codex-gated, and public** at github.com/pcomans/eve-event-catalog.
-  HEAD = **ee77dfa** on `main`, tree clean (only untracked `.claude/`). 86 tests green.
-- What exists: eve app (Nitro, port 2000) with catalog channel (chat/wake/subscriptions),
-  declarative `catalog/catalog.json` (Ajv-enforced, server-side-only onWake guidance),
-  Redis-backed registry, wake delivery (in-process claim + expiry timers), Alpaca provider (SDK
-  `4.0.0-alpha.3`, push-based, edge-triggered crossings), EDGAR provider (coalesced 30s/CIK
-  poll), 5 fully-autonomous agent tools, LangSmith OTel.
-- **The next phase has NOT started.** No production/Vercel/observatory/mandate-agent code exists
-  yet. The plan doc is approved but unbuilt.
+- **Phases 1–3 of the production plan are BUILT and Codex-gated.** Phase 1 + clock provider are
+  merged on `main`. Phases 2–3 (connector service, gap replay, fencing, chain-guard +
+  supervisor, EDGAR/expiry/recovery sweep workflows, pnpm workspace) live on branch
+  **`phase2-connector`** (pushed), built in the worktree `../event-catalogue-phase2`. Its own
+  handoff — `HANDOFF-PHASE3.md` at that worktree's root, on the branch — is the authoritative
+  module-by-module state; read it before touching that code.
+- **A live demo is (or was) running on Philipp's machine**: dev server on :2000, conversation
+  **campaign-4** (the standing-mandate trading agent, buy-only), 5 armed subscriptions
+  (TSM crossings + filing, CVX crossings), live view at `localhost:2000/catalog/observe`.
+  The Alpaca paper account holds at least one position bought by campaign-2 (position
+  survives conversation resets — it lives in the account).
+- **The cloud is empty by design right now**: all preview deployments were deleted (with
+  Philipp's approval) to stop their sweep chains from touching the shared Redis during the
+  demo. Only an inert, pre-cron production shell serves event-catalogue.vercel.app (frozen for
+  incident review — see below). Redeploying the connector is one `vercel deploy
+  --target=preview` from the worktree (verify target via `vercel inspect`, ALWAYS).
 
-## Decisions locked this session (do not re-litigate)
+## Demo-day emergency work (on main, typechecked + live-verified, SUITE RUN + CODEX GATE OWED)
 
-All confirmed with Philipp 2026-07-12 and folded into the plan (commits 17f732e, ee77dfa):
+Committed under demo pressure with explicit process exceptions; the post-demo gate MUST review:
+1. **`/catalog/observe`** — live observatory page (subscriptions/event feed/streaming
+   transcript), `catalog/observe-page.ts` + routes in `agent/channels/catalog.ts` (incl. new
+   public `GET /catalog/conversations/:id`). Lead-authored fixes inside it: incremental stream
+   reader (a `.text()` on the never-closing stream hung forever), `reasoning.appended`
+   rendering, stable sort by createdAt.
+2. **LangSmith trace filter + Threads metadata** (`agent/instrumentation.ts` + baggage wrapper
+   in the channel): ThreadMetadataSpanProcessor (OTEL baggage → `ai.telemetry.metadata.
+   session_id/thread_id`, PROVEN working — runs landed with `thread_id: campaign-2`) and a
+   noise filter. **THE EXPORTER IS CURRENTLY BROKEN — zero spans reach LangSmith since ~16:17Z
+   despite turns running.** Root-cause OFFLINE in a harness (console exporter side-by-side),
+   NOT by live iteration: each agent/instrumentation edit + restart orphans parked sessions.
+   Known findings so far: dropping parent spans (HTTP roots, engine flow-POSTs) makes LangSmith
+   discard the orphaned children — eve's model/tool spans live UNDER engine-internal spans;
+   only true leaves (GET-route server spans, upstash client fetches) are safely filterable.
+3. **WATCHER_HOST switch** in `catalog/providers/alpaca.ts` (+ test) — from the p2v round;
+   `connector` value is MANDATORY on any deployed eve app (plan Phase 6 checklist).
 
-1. **Full realtime connector** is the point (not the polling fallback) — the 4 correctness
-   prerequisites are the majority of the build.
-2. **Topology: ONE Vercel project, THREE Vercel Services** — eve app + connector-runtime (public
-   `workflow` pkg) + Next.js observatory; private bindings; shared Upstash Redis; atomic deploy.
-   Same-app Workflows are INFEASIBLE (eve vendors `@workflow/*` `5.0.0-beta` privately; public
-   `workflow` is `4.6.0`, incompatible; `/.well-known/workflow` route collision). Vercel Services
-   preserves the "one deploy on Vercel" story.
-3. **Model: DeepSeek V4-Pro via Vercel AI Gateway.** Use model id `deepseek-v4-pro` — NOT the
-   legacy `deepseek-chat`/`deepseek-reasoner` aliases (they **deprecate 2026-07-24**, would break
-   the campaign mid-run). eve reaches it via AI Gateway OIDC (no DeepSeek key in prod; local dev
-   needs `AI_GATEWAY_API_KEY`).
-4. **Mandate: fully open** — agent picks symbols, strategy, sizing. Trades: **buy + sell held
-   positions**, no shorting. **Guardrails minimal**: a runaway/loop turn-cap only (cost is not a
-   constraint on a cheap model + paper money); do NOT add notional / trades-per-day /
-   max-subscription blockers — they constrain the showcase autonomy. Keep the existing
-   paper-only / buy-side / market / day-order correctness bounds.
-5. **Observatory is read-only and fully public**, including **all conversation transcripts**
-   (agent reasoning + tool calls — "see it think"). Chat/subscribe stay private. Reuse eve's
-   `defaultMessageReducer` (`eve/react`|`eve/client`) to render transcripts server-side from
-   `GET /eve/v1/session/:id/stream?startIndex=0`; equity/positions/subscriptions/feed are custom
-   Next.js over Redis + the Alpaca account. No prebuilt eve chat page exists.
-6. **Vercel Pro is available** (Fluid 800s/1800s, Queues, Cron).
-7. **Process:** Sonnet agents build/test (TDD red-green, node:test), lead orchestrates + writes
-   docs only, every coding step gets a Codex gate (gpt-5.6-sol xhigh, narrow passes — long
-   verdicts hang; kill the repo's broker tree on ≥3min silence, retry). Check npm versions before
-   adding deps. Verify `git log` before believing any "done". Stage by full-diff review.
-8. **Architecture forks STOP and ask Philipp** before committing to a branch (both known forks —
-   connector host, dashboard host — are already decided above; this applies to *new* forks).
+## Sharp edges learned today (beyond KNOWN_ISSUES — fold in during the gate)
 
-## Phase 0 research — RESOLVED (deploy-research + dashboard-research, 2026-07-12)
+- **Editing channel or instrumentation files orphans ALL parked sessions** (unhandled-queue
+  spam, unwakeable). Editing leaf files (e.g. `catalog/observe-page.ts`) is safe — proven both
+  ways, twice each. Restart alone (no edit) is survivable; the conversation re-arms its
+  watchers with one message ("restart = re-subscribe", one turn).
+- **Purge `.workflow-data` after any session-orphaning event** — orphaned runs retry-loop
+  forever, spamming logs and (when tracing works) LangSmith.
+- **LangSmith monthly quota exhausted = silent trace loss** (KNOWN_ISSUES #6 addendum);
+  Philipp upgraded the plan 2026-07-13, ingest verified 202.
+- **The subscriptions registry returns Redis-set order** — anything rendering it must sort.
 
-Full findings are in the plan's Phase 0 section. Key facts the build depends on:
+## Post-demo checklist (in order)
 
-- **Queues**: `@vercel/queue@0.4.0`, `send()`/`handleCallback()`, `experimentalTriggers`
-  `queue/v2beta` makes consumer routes private; not Pro-gated.
-- **Alpaca gap replay on FREE IEX is viable** — the 15-min delay is SIP-only. Dedupe key
-  `i`+`x`+`t`; order reconciliation via `GET /v2/orders?status=closed&after=&until=`.
-- **eve deploy**: ordinary Vercel project; `vercel deploy` (**NOT `--prebuilt`**); route-auth
-  secrets must be real Vercel env vars. Self-invoking wake loopback works UNLESS Deployment
-  Protection is on → then attach `VERCEL_AUTOMATION_BYPASS_SECRET`.
-- **No eve session-list API exists** — track sessionIds in Redis (we already do).
+1. **Confirm with Philipp the demo is over** before touching the server or the tree.
+2. Stop the dev server → run the FULL suite in BOTH trees (main expects 155+; worktree 265+ as
+   of HANDOFF-PHASE3.md; server must be DOWN — KNOWN_ISSUES #11).
+3. **Codex gate on the demo-day batch** (observe page + instrumentation + the lead's direct
+   edits — narrow passes, file-append verdict protocol per METHOD.md).
+4. **LangSmith exporter root-cause** in an offline harness; fix; verify with one real turn
+   (expect: llm/tool runs landing, junk filtered, Threads grouping by conversationId).
+5. **Merge `phase2-connector` into main** after its final suite run on the merged tree.
+6. Relaunch the campaign (campaign-5 or reuse campaign-4 if still alive) — it should rediscover
+   its position via get_account/positions.
+7. Then the remaining plan: **Phase 4** (mandate agent: DeepSeek V4-Pro + gateway
+   parallelSearch — DECIDED, probe-verified; sell tool; turn cap; instructions rewrite from the
+   seed in the plan; market-open schedule), **Phase 5** (observatory — the observe page is the
+   seed; vercel/chatbot only if it reduces work, time-boxed spike), **Phase 6** (deploy:
+   WATCHER_HOST=connector, CATALOG_API_SECRET to prod, #7 re-verification hard gate, cloud E2E
+   ×2 in market hours, one unattended day, THEN the link goes out).
+8. Backlog (task list): idempotent subscribe_event (task #21, post-demo by Philipp's explicit
+   call), restore test parallelism via marker-aware stubs, workflow run cancellation path
+   (ops), Deployment Protection dashboard toggle (Philipp action, "open from day one").
 
-## Open threads (carry into the build — none block starting)
+## Open incidents for Philipp's review
 
-1. ~~Gate 7 — the "run forever" API~~ **RESOLVED 2026-07-12** (gate7-research): recursion across
-   runs via `start(self, [state])` in the final step (no `continueAsNew`); chain before ~2,000
-   events; ws steps capped by Fluid ceiling (800s GA ≈ 12-min sessions); steps retry from the
-   top → through-write + idempotent + drop=return. Full findings:
-   `docs/architecture.md` ("How workflow@4.6.0 expresses 'forever'"). One carry-over: verify
-   vercel/workflow issue #634 (sleep-resume) on a preview deploy early in Phase 2.
-2. **world-vercel pre-park buffering (KNOWN_ISSUES #7)** — structurally likely to hold (eve's
-   buffering is world-agnostic), but the network round-trip changes the race window. **Hard
-   test on a real preview deploy before trusting arming (Phase 6 gate).**
-3. **Queues-from-Nitro** — no doc confirms clean use from a Nitro route; smoke-test early in
-   Phase 1.
-4. **Task 7 (supervised local live market-hours demo, twice)** is still formally open; likely
-   subsumed by Phase 6's cloud E2E but not yet confirmed as such.
+- **Accidental production deploy** (2026-07-13 ~05:00Z): first-ever `vercel` deploy defaulted
+  to production (KNOWN_ISSUES #13); an inert 404 connector shell holds event-catalogue.
+  vercel.app. Decide: leave until Phase 6 replaces it, or delete.
+- **LangSmith traces**: paid plan now active; the local exporter break (above) is ours, not
+  LangSmith's.
 
-## How to resume
+## Decisions locked (do not re-litigate; full list in plan + memory)
 
-Read `docs/plan-vercel-production.md` and execute Phases 0→6, authoring **AT-10…AT-14**
-(`docs/acceptance-tests.md`) FIRST (tests-before-build applies to acceptance criteria). Before any
-live/demo work: `vercel env pull` with the dev server DOWN (OIDC ~12h; the pull OVERWRITES
-`.env.local`), fresh conversation ids. New secrets to promote to Vercel prod when their phase
-lands: `CATALOG_API_SECRET` (provisioned in dev scope 2026-07-12; promote to prod in Phase 6),
-`AI_GATEWAY_API_KEY` (local only). Tavily was dropped 2026-07-12 — eve's built-in
-provider-managed `web_search` instead; `TAVILY_API_KEY` only returns if the Phase 4 fallback
-is needed (see plan Phase 4).
+Three-service Vercel Services topology · durable sleep for timers (smoke-verified; #634 did not
+reproduce) · chain-claim + supervisor-cron for run-forever (retry-fork SDK bug is real,
+KNOWN_ISSUES #15) · DeepSeek V4-Pro + gateway parallelSearch (terra+native = escalation) · ONE
+perpetual campaign conversation · Deployment Protection OFF · LangSmith upgrade done · buy-only
+until Phase 4's sell tool · demo-first prioritization (hardening queued behind the working demo).
+
+## Team state
+
+phase1-builder: STOOD DOWN permanently (do not resume — see METHOD.md postmortem).
+phase3-builder: holding; knows the worktree best; owes nothing. One writer per worktree, ever.
+Codex runtime: healthy; use file-append verdicts; cancel stale jobs via
+`codex-companion.mjs cancel <job-id>`.
