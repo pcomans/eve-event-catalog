@@ -169,7 +169,19 @@ value byte-exact with a second client (`Redis.fromEnv({ automaticDeserialization
 never parse→re-stringify it; and remember `@upstash/redis` auto-retries failed commands (~5×),
 so fault-injection tests need sustained failures, not single-shot throws.
 
-## 13. Assorted
+## 13. A never-deployed project's FIRST `vercel` deploy targets production
+
+Observed 2026-07-13, verified from the deploy output: on a project with no prior production
+deployment ("Latest Production URL: --"), a bare `vercel` / `vercel --yes` (no `--prod`)
+created a deployment with `"target": "production"` and aliased the project's production domain
+to it — the usual "bare deploy = preview" behavior does not hold for the very first deploy.
+Bit us during a Phase 2 smoke test: a throwaway connector build briefly became
+event-catalogue.vercel.app (inert — 404 on all routes, no secrets, nothing overwritten, since
+nothing had ever been deployed). Rule: on a project's first-ever deploy, pass the target
+explicitly and read back `"target"` in the deploy output before doing anything that depends on
+it being a preview.
+
+## 14. Assorted
 
 - The dev server listens on port **2000**, not 3000 as eve's own docs curl examples suggest.
 - Local durable workflow state lives in `.workflow-data/` (gitignored). If sessions look stuck
