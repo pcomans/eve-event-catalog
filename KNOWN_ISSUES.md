@@ -181,6 +181,16 @@ nothing had ever been deployed). Rule: on a project's first-ever deploy, pass th
 explicitly and read back `"target"` in the deploy output before doing anything that depends on
 it being a preview.
 
+**Related (2026-07-13): preview URLs are SSO-walled by default.** Plain curl against a preview
+deployment 302s to vercel.com/sso-api — Vercel's default Standard Protection applies to
+previews regardless of any project posture we've decided in docs (production URLs are NOT
+walled by default; that's why the loopback concern only applies if protection is turned up).
+Sanctioned bypass for scripts/tests, no env var needed:
+`vercel curl <path> --deployment <url> --yes -- <curl-args>` (auto-generates a
+protection-bypass token from the authenticated CLI session). To make previews truly public
+per the "open from day one" decision, the project's Deployment Protection setting must be
+changed in the dashboard — a Philipp action, not CLI.
+
 ## 14. Assorted
 
 - The dev server listens on port **2000**, not 3000 as eve's own docs curl examples suggest.
