@@ -63,6 +63,13 @@ security rule below), never derived from `payload`. Full design:
    `tests/` (e.g. `tests/agent-tools/`); catalog tests stay next to their modules in `catalog/`.
 8. Every coding step gets an independent Codex review (gpt-5.6-sol, xhigh) before dependent work
    builds on it — orchestrated by the session lead; don't self-certify.
+9. **Heartbeat discipline — silence is a failure signal (Philipp, 2026-07-13, after a builder
+   sat stalled for 5 hours unnoticed).** Working agents report progress at least every ~30
+   minutes (a one-line "still on X, N of M done" counts). The lead treats ≥45 minutes of
+   builder silence during expected work as an incident: send a status ping immediately — a
+   ping both detects AND revives a stalled agent — and never rely on a single watchdog; the
+   fallback timer (ScheduleWakeup or equivalent) must itself be monitored for death and
+   re-armed. "I assumed it was working" is not an acceptable postmortem line.
 
 ## Environment
 

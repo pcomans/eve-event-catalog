@@ -63,6 +63,16 @@ Two properties matter more than the sequence:
   permission laundering. The lead surfaces the decision to Philipp and acts only on his
   explicit answer. A builder flagging the denial (rather than routing around it) is doing it
   right.
+- **Silence is a failure signal.** A stalled background agent never notifies anyone — it just
+  goes quiet, and quiet looks identical to "working hard" until you check. Postmortem
+  (2026-07-13): a builder sat stalled for FIVE HOURS mid-fix-round because the lead's watchdog
+  processes had been silently reaped and no fallback existed. Rules since: builders report at
+  least every ~30 minutes; the lead treats ≥45 minutes of unexpected silence as an incident and
+  pings immediately — a status ping is both the detector AND the cure, since any message resumes
+  a stalled agent (see the rule below for the flip side of that coin); watchdogs are themselves
+  monitored — when one dies, it is re-armed or replaced, never silently abandoned; and during
+  long unattended stretches the lead arms a harness-native fallback timer rather than relying
+  only on ad-hoc background loops.
 - **One writer per worktree, and retirement is permanent.** Sending any message to an idle
   agent RESUMES it — so a directive that crosses with an agent's wind-down report can
   reactivate an agent the lead believes retired. Learned the hard way (2026-07-13): a resumed
