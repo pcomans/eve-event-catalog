@@ -63,6 +63,15 @@ Two properties matter more than the sequence:
   permission laundering. The lead surfaces the decision to Philipp and acts only on his
   explicit answer. A builder flagging the denial (rather than routing around it) is doing it
   right.
+- **One writer per worktree, and retirement is permanent.** Sending any message to an idle
+  agent RESUMES it — so a directive that crosses with an agent's wind-down report can
+  reactivate an agent the lead believes retired. Learned the hard way (2026-07-13): a resumed
+  "retired" builder and its freshly-spawned successor built the same feature concurrently in
+  one worktree. Rules since: exactly one agent may write to a worktree at any time; a
+  stood-down agent is told explicitly that future messages do NOT reactivate it without an
+  explicit reactivation phrase; when handing off, the lead confirms the predecessor is inert
+  BEFORE the successor starts. Both agents behaved correctly in the collision — stop-and-report
+  on discovering foreign files is the right move, and adjudication is the lead's job.
 
 ## Working with Codex
 
