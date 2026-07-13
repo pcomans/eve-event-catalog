@@ -1,0 +1,17 @@
+{
+  "services": {
+    "connector": {
+      "root": "connector/",
+      "installCommand": "cd .. && corepack pnpm@10.32.1 install --frozen-lockfile"
+    }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": { "service": "connector" } }
+  ],
+  "crons": [
+    { "path": "/ensure-running", "schedule": "*/5 * * * *" },
+    { "path": "/ensure-edgar-running", "schedule": "*/5 * * * *" },
+    { "path": "/ensure-expiry-running", "schedule": "*/5 * * * *" },
+    { "path": "/ensure-recovery-running", "schedule": "*/5 * * * *" }
+  ]
+}

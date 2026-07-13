@@ -1,0 +1,21 @@
+{
+  "name": "connector",
+  "private": true,
+  "type": "module",
+  "description": "Phase 2 (docs/plan-vercel-production.md) — the connector runtime as its own Vercel Service: chained Workflow steps hold the real Alpaca market-data/trade_updates sockets, gap-replaying on every reconnect and fencing every write, with the same pure decision modules the eve app's in-process provider uses.",
+  "scripts": {
+    "dev": "nitro dev",
+    "build": "nitro build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "workflow": "4.6.0",
+    "nitro": "3.0.260610-beta",
+    "@alpacahq/alpaca-trade-api": "4.0.0-alpha.3",
+    "@upstash/redis": "1.38.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.x",
+    "typescript": "7.0.2"
+  }
+}

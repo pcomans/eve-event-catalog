@@ -13,6 +13,20 @@ const redis = Redis.fromEnv();
 
 const SUB_KEY = (id: string) => `catalog:sub:${id}`;
 const SUB_INDEX_KEY = "catalog:subs";
+// Phase 3's expiry migration (docs/plan-vercel-production.md): a Redis
+// sorted set, score = expiresAt as epoch ms, member = subscription id — the
+// durable side's own "which subscriptions are due" query
+// (readDueExpirySubscriptionIds below), independent of any in-process timer.
+// Dual-written inside writeSubscription (below) rather than requiring every
+// caller to remember to index separately: any write that leaves a
+// subscription "armed" with a non-null expiresAt adds/keeps it in the set;
+// any write that doesn't (disarmed, terminal, or armed-with-no-expiry)
+// removes it. This keeps the set an accurate, real-time reflection of
+// "currently armed with this expiry" with no dedicated arm/disarm call
+// sites to remember — wake.ts's own scheduleExpiry (the in-process timer,
+// kept for local dev) needs ZERO code changes to also participate, since it
+// already arms via updateSubscription like everything else.
+const EXPIRY_INDEX_KEY = "catalog:expiry-index";
 const CONV_KEY = (conversationId: string) => `catalog:conv:${conversationId}`;
 // Reverse index: a tool's ctx.session.id is the eve sessionId, not the
 // conversationId subscriptions are keyed by (eve's ToolContext exposes no
@@ -35,6 +49,26 @@ async function readSubscription(id: string): Promise<Subscription | null> {
 async function writeSubscription(sub: Subscription): Promise<void> {
   await redis.set(SUB_KEY(sub.id), sub);
   await redis.sadd(SUB_INDEX_KEY, sub.id);
+  if (sub.status === "armed" && sub.expiresAt) {
+    await redis.zadd(EXPIRY_INDEX_KEY, { score: new Date(sub.expiresAt).getTime(), member: sub.id });
+  } else {
+    await redis.zrem(EXPIRY_INDEX_KEY, sub.id);
+  }
+}
+
+/**
+ * Every subscription id currently armed with `expiresAt <= nowMs` — the
+ * durable expiry sweep's own read side (connector/workflows/expiry-sweep.ts).
+ * A hit here means "was armed-with-this-expiry as of the last write," not a
+ * guarantee the subscription is STILL armed at read time — a subscription
+ * that fired/expired/failed moments earlier can still appear until its own
+ * terminal write clears the index entry (same "diffing aid, not a delivery
+ * lock" tolerance as edgar-redis.ts's seen-set: the real safety net is
+ * registry.ts's own tryTransitionToDelivering CAS, which safely no-ops a
+ * caller trying to expire an already-terminal subscription).
+ */
+export async function readDueExpirySubscriptionIds(nowMs: number): Promise<string[]> {
+  return redis.zrange<string[]>(EXPIRY_INDEX_KEY, "-inf", nowMs, { byScore: true });
 }
 
 export interface NewSubscriptionInput {
@@ -67,10 +101,11 @@ export async function createSubscription(input: NewSubscriptionInput): Promise<S
   return sub;
 }
 
-/** Test-hygiene helper: removes a subscription and its index entry. Not used by product code. */
+/** Test-hygiene helper: removes a subscription and its index entries. Not used by product code. */
 export async function deleteSubscription(id: string): Promise<void> {
   await redis.del(SUB_KEY(id));
   await redis.srem(SUB_INDEX_KEY, id);
+  await redis.zrem(EXPIRY_INDEX_KEY, id);
 }
 
 /** Test-hygiene helper: removes a conversation record and its reverse sessionId index. Not used by product code. */

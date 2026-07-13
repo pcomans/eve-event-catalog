@@ -11,6 +11,7 @@ import {
   getConversationBySessionId,
   getSubscription,
   listSubscriptionsByStatus,
+  readDueExpirySubscriptionIds,
   recordConversation,
   tryTransitionToDelivering,
   updateSubscription,
@@ -359,4 +360,95 @@ test("tryTransitionToDelivering: a params string value that happens to equal the
 
   const stored = await getSubscription(sub.id);
   assert.equal(stored?.params.note, "__catalog_null_marker__");
+});
+
+// Phase 3's expiry migration: the sorted-set index (dual-written inside
+// writeSubscription) is the durable expiry sweep's own read side. These
+// tests exercise it directly through the same public API every real caller
+// uses (createSubscription/updateSubscription), never touching the ZSET
+// key by hand, so a future change to the indexing rule is caught here too.
+test("readDueExpirySubscriptionIds: an armed subscription with a past expiresAt is due; a future one is not", async (t) => {
+  const conversationId = testConversationId();
+  const past = await createSubscription({
+    conversationId,
+    provider: "alpaca",
+    event: "price.crossesBelow",
+    resource: "NVDA",
+    params: { threshold: 150 },
+    expiresAt: "2020-01-01T00:00:00.000Z",
+  });
+  t.after(() => deleteSubscription(past.id));
+  await updateSubscription(past.id, { status: "armed", armedAt: new Date().toISOString() });
+
+  const future = await createSubscription({
+    conversationId,
+    provider: "alpaca",
+    event: "price.crossesBelow",
+    resource: "NVDA",
+    params: { threshold: 150 },
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  });
+  t.after(() => deleteSubscription(future.id));
+  await updateSubscription(future.id, { status: "armed", armedAt: new Date().toISOString() });
+
+  const due = await readDueExpirySubscriptionIds(Date.now());
+  assert.ok(due.includes(past.id), "a subscription whose expiresAt is already past must be due");
+  assert.ok(!due.includes(future.id), "a subscription whose expiresAt is still in the future must not be due");
+});
+
+test("readDueExpirySubscriptionIds: a pending (not yet armed) subscription with a past expiresAt is never due", async (t) => {
+  const conversationId = testConversationId();
+  const sub = await createSubscription({
+    conversationId,
+    provider: "alpaca",
+    event: "price.crossesBelow",
+    resource: "NVDA",
+    params: { threshold: 150 },
+    expiresAt: "2020-01-01T00:00:00.000Z",
+  });
+  t.after(() => deleteSubscription(sub.id));
+  // Deliberately left "pending" — arming is what indexes it.
+
+  const due = await readDueExpirySubscriptionIds(Date.now());
+  assert.ok(!due.includes(sub.id), "an un-armed subscription must never appear as due, regardless of its expiresAt");
+});
+
+test("readDueExpirySubscriptionIds: an armed subscription with no expiresAt is never indexed at all", async (t) => {
+  const conversationId = testConversationId();
+  const sub = await createSubscription({
+    conversationId,
+    provider: "alpaca",
+    event: "price.crossesBelow",
+    resource: "NVDA",
+    params: { threshold: 150 },
+    expiresAt: null,
+  });
+  t.after(() => deleteSubscription(sub.id));
+  await updateSubscription(sub.id, { status: "armed", armedAt: new Date().toISOString() });
+
+  // Far in the future relative to any real clock — proves this isn't just
+  // "not due yet," it's genuinely absent from the index.
+  const due = await readDueExpirySubscriptionIds(Date.parse("2099-01-01T00:00:00.000Z"));
+  assert.ok(!due.includes(sub.id));
+});
+
+test("readDueExpirySubscriptionIds: a subscription reaching a terminal status is removed from the index", async (t) => {
+  const conversationId = testConversationId();
+  const sub = await createSubscription({
+    conversationId,
+    provider: "alpaca",
+    event: "price.crossesBelow",
+    resource: "NVDA",
+    params: { threshold: 150 },
+    expiresAt: "2020-01-01T00:00:00.000Z",
+  });
+  t.after(() => deleteSubscription(sub.id));
+  await updateSubscription(sub.id, { status: "armed", armedAt: new Date().toISOString() });
+
+  assert.ok((await readDueExpirySubscriptionIds(Date.now())).includes(sub.id), "sanity check: indexed while armed");
+
+  await updateSubscription(sub.id, { status: "expired", firedAt: new Date().toISOString() });
+
+  const due = await readDueExpirySubscriptionIds(Date.now());
+  assert.ok(!due.includes(sub.id), "a subscription that already reached a terminal status must not linger in the expiry index");
 });
