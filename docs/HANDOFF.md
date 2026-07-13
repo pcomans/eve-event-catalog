@@ -58,14 +58,23 @@ Plan: `docs/plan-vercel-production.md`. Project memory:
 
 ## Remaining checklist (in order)
 
-5. **Merge `phase2-connector` into main** after a green full suite on the merged tree. The
-   merge also brings `--test-concurrency=1`, which structurally fixes the cross-file
-   live-Redis suite flakes (`wake.test.ts` flaked twice in different tests during full-suite
-   runs this evening — known class, solo runs 3/3 green, don't chase it pre-merge).
-6. **Relaunch the campaign as campaign-5** (campaign-4's session is gone — see above; delete
-   its stale armed rows first). The agent rediscovers its position via get_account/positions.
-   Verify at relaunch, in a browser: the observe page's reasoning bubbles on a real
-   reasoning-bearing turn (the one fix-round item never exercised live end-to-end).
+5. ~~Merge~~ **DONE (bd99644, pushed): merged, one KNOWN_ISSUES conflict resolved (both
+   addenda kept), merged tree 272/272 + both typechecks + connector build green, zero flakes
+   under the branch's `--test-concurrency=1` (which closed the wake.test.ts cross-file class
+   observed twice pre-merge).**
+6. ~~Relaunch~~ **DONE (2026-07-13 ~23:05Z): campaign-5 LIVE and parked** (session
+   `wrun_01KXEVN57ARCSWM6RC2KX4N8TN`), dev server up on :2000, `.workflow-data` purged
+   pre-launch (a leftover fixcheck-1 session was retry-spamming). First turn: rediscovered the
+   TSM position + $96k cash, researched (knows TSMC Q2 earnings land July 16), armed 4
+   subscriptions (market-open clock wake 2026-07-14T13:30Z — correctly Tuesday; TSM
+   crossings 412/432; TSM filing.new), placed no orders (market closed) — all verified in the
+   browser on the observe page, LangSmith runs landing with `thread_id=campaign-5`.
+   CAVEATS: (a) campaign-4's 5 stale armed rows are STILL in Redis — my deletion was
+   permission-blocked; Philipp must delete them (or approve deletion) before any connector
+   deploy, they're inert-but-visible until then; (b) the reasoning-bubble render is verified
+   against eve's types but still never exercised live — the current model emits no reasoning
+   events; close it out on Phase 4's model; (c) the laptop must stay awake for the campaign's
+   clock wake (caffeinate or power settings — Philipp's machine, Philipp's call).
 7. Then the plan: **Phase 4** (mandate agent: DeepSeek V4-Pro + gateway parallelSearch —
    DECIDED, probe-verified; sell tool; turn cap; instructions rewrite; market-open schedule),
    **Phase 5** (observatory — observe page is the seed), **Phase 6** (deploy:
