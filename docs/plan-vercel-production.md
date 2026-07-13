@@ -275,7 +275,12 @@ Read-only; no secrets rendered; rate limiting if trivially available. This is th
 face — presentation quality matters (the audience is a Vercel engineer).
 
 **Phase 6 — production deploy + cloud E2E + campaign launch.** Promote env vars to production
-(incl. new secret: CATALOG_API_SECRET; TAVILY_API_KEY only if the Phase 4 web_search fallback was needed), deploy, re-verify KNOWN_ISSUES #7 on
+(incl. new secret: CATALOG_API_SECRET; TAVILY_API_KEY only if the Phase 4 web_search fallback was needed). **MANDATORY env on the deployed
+eve app: `WATCHER_HOST=connector`** — without it the eve app silently opens its own Alpaca
+streams alongside the connector's (the p2v finding-1 bug returns with no test to catch it;
+default is in-process for local dev). Also verify live-API boundary semantics the suite
+deliberately leaves untested (alpaca-client REST wrappers — accepted trade-off 2026-07-13).
+Deploy, re-verify KNOWN_ISSUES #7 on
 world-vercel (hard gate for trusting arming in prod), then the full cloud E2E during market
 hours: subscribe → park → real cross → wake → autonomous trade → fill wake → all visible on the
 public site. Twice. Then launch the standing campaign, observe one full unattended market day
