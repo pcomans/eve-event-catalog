@@ -53,7 +53,11 @@ sessionId maps), wake delivery with in-process claim + expiry timers, Alpaca pro
 seeded prev), EDGAR provider (coalesced 30s/CIK polling), 5 agent tools (fully autonomous —
 approval gate removed by explicit decision), LangSmith OTel, 86 tests. `docs/architecture.md`
 documents the deployment thinking, incl. the "Deploying to Vercel" section this plan executes.
-Task 7 (supervised live market-hours demo, twice) is still pending and independent of this plan.
+Task 7 (supervised live market-hours demo, twice) is RETIRED (Philipp, 2026-07-13: "kill the
+local demo") — superseded entirely by Phase 6's cloud E2E. The 2026-07-13 overnight local launch
+experiment (campaign-launch-1: agent discovered clock/time.at, chose its own market-open wake,
+acknowledged the mandate) was killed before its wake fired; the campaign relaunches fresh on the
+deployed system.
 
 ## The four correctness prerequisites (requirements, not options)
 
