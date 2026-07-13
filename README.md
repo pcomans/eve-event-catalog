@@ -326,22 +326,13 @@ Every part of the system runs on a Vercel primitive. One Vercel project, three
 | Secrets | **Vercel env store** (`vercel env pull` locally) |
 
 ```mermaid
-flowchart TB
-    subgraph project["One Vercel project — three Vercel Services, private bindings"]
-        EVE["eve app — Functions<br/>agent · catalog API · wake route 🔒"]
-        CONN["connector — Workflows<br/>websockets · polls · timers"]
-        OBS["observatory — Next.js<br/>public, read-only"]
-    end
-    Q["Queues<br/>wake delivery"]
-    R[("Upstash Redis<br/>all state")]
-    W["Alpaca · SEC EDGAR"]
-    CONN -->|"watch"| W
-    CONN -->|"event fired"| Q
-    Q -->|"wake"| EVE
-    EVE <--> R
-    CONN <--> R
-    OBS --> R
-    OBS -->|"transcript replay"| EVE
+flowchart LR
+    W["the world<br/>Alpaca · SEC EDGAR"] -->|"watch"| CONN["connector<br/>(Workflows)"]
+    CONN -->|"event fired"| Q["Queues"]
+    Q -->|"wake"| EVE["agent + catalog<br/>(Functions)"]
+    CONN -.-> R[("Redis")]
+    EVE -.-> R
+    R -.-> OBS["observatory<br/>(Next.js, public)"]
 ```
 
 Status: the delivery backbone (Phase 1) is done — built queue-shaped so the local code is
