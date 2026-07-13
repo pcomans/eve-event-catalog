@@ -336,11 +336,36 @@ flowchart LR
     R -.-> OBS["observatory<br/>(Next.js, public)"]
 ```
 
-Status: the delivery backbone (Phase 1) is done — built queue-shaped so the local code is
-already the queue's consumer-side correctness. The connector, durable timers, mandate agent,
-observatory, and the deploy itself are Phases 2–6 of
-[`docs/plan-vercel-production.md`](docs/plan-vercel-production.md). Until then, cloning this
-repo gets you the fully-working local system.
+### How the always-on part works
+
+Vercel Workflows cap every run (25k events, 10k steps), so nothing loops forever *inside* one
+run. Instead, each watcher is a chain of bounded runs: a run does ~360 ticks of work (a socket
+session, or "sweep + durable 30-second sleep"), then its final step starts a fresh run of
+itself and returns — infinity as recursion across runs. Two guards keep "forever" honest:
+
+- a **chain claim** (Redis `SET NX` per generation) so a retried step can never fork two
+  immortal chains — a real SDK failure mode we hit and now test for;
+- a **supervisor** (Vercel Cron, every 5 minutes) that watches each chain's Redis heartbeat and
+  starts a fresh chain if one dies. The same mechanism bootstraps a chain on first deploy.
+
+There are exactly **four chains** — market-data socket sessions, the EDGAR sweep, the expiry
+sweep, and the delivery-recovery sweep — no matter how many subscriptions exist. Subscriptions
+are Redis rows; the chains re-read them on a short cadence and adjust what they watch. On every
+reconnect, the market-data chain replays the gap from a persisted per-symbol cursor so an
+edge-triggered crossing that happened *between* socket sessions still fires — exactly once,
+guarded by the same compare-and-swap that makes all delivery idempotent.
+
+One repo serves both worlds: the same provider code runs in-process for local dev and inside
+the connector service in the cloud, switched by `WATCHER_HOST`. The repo is a pnpm workspace so
+the connector service (its own package under `connector/`) shares the `catalog/` modules.
+
+Status: the delivery backbone (Phase 1) and the clock provider are on `main`. The connector
+service with all four chains (Phases 2–3) is built, review-gated, and verified on a live
+preview deployment — a sweep chain ran unattended on Vercel overnight, handing off between
+run generations on schedule — and lands on `main` next. Remaining: the standing-mandate agent
+(Phase 4), the public observatory (Phase 5), and the production deploy + cloud E2E (Phase 6) of
+[`docs/plan-vercel-production.md`](docs/plan-vercel-production.md). Cloning this repo today
+gets you the fully-working local system.
 
 ## Verification and observability
 
