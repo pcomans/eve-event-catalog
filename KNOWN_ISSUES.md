@@ -34,6 +34,21 @@ mid-turn ("Unhandled queue" log spam). Corollaries:
 - `VERCEL_OIDC_TOKEN` expires after ~12h; refresh with `vercel env pull` (server down) **before**
   a demo or test session, never during one.
 
+**Addendum (2026-07-13, from the LangSmith exporter incident's offline harness — see
+`spikes/langsmith-exporter-harness/FINDINGS.md`): a reload doesn't just go stale — it actively
+DELETES.** eve's dev env loader (`dist/src/cli/dev/environment.js`, parsing via `node:util`'s
+`parseEnv` — same parser as `node --env-file`, quotes handled identically) removes from
+`process.env` any key it set on a previous load that is absent from the new file read. So one
+reload against an incomplete `.env.local` doesn't leave the old value in place — it deletes the
+var from the live process, and it stays gone until a later reload sees a complete file or the
+process restarts. Combined with #6 (exporter silently no-ops without `LANGSMITH_TRACING`), this
+is a verified mechanism for "some subsystem died silently at time T and stayed dead" (repro:
+`spikes/langsmith-exporter-harness/step6-env-reload-deletion.mjs`). The file watcher's
+`awaitWriteFinish` (160ms stability) protects against reading a torn single-writer write, so the
+realistic trigger is two writers overlapping on `.env.local` — which the rule above already
+forbids. The corollary is new: if a subsystem that reads env per-operation goes quiet, suspect a
+past bad reload FIRST, and know a clean restart fixes it.
+
 ## 3. eve's custom-channel docs example for streaming is broken
 
 `session.getEventStream()` returns a `ReadableStream` of JS objects, not bytes. Passing it
@@ -246,3 +261,13 @@ instance IT runs in, and falsely report "no test-feed trade observed yet" even w
 stream is actively ticking in the main process's instance. Not fixed now — the real fix is
 Phase 2's provider extraction (moving providers out of this same-process, multi-instance-prone
 arrangement entirely), not a patch here.
+
+**Extension (2026-07-13, post-demo Codex gate pass C): the same gap becomes deterministic —
+not just multi-instance-flaky — under `WATCHER_HOST=connector` + `ALPACA_DATA_FEED=test`.** In
+connector mode the in-process arm() guards mean `handleTrade` (the only writer of
+`testFeedTrades`) never runs in the eve process at all, and a separate connector process can't
+populate an in-process Map — so `get_latest_price` always fails on the test feed even while the
+connector is receiving FAKEPACA ticks, and price-wake guidance tells the agent to do exactly
+that fresh-price check before acting. The IEX path is unaffected (REST). Fix tracked for
+post-merge, before Phase 6's cloud E2E (task #27): fall back to the connector's Redis-persisted
+per-symbol latest price (`gap-replay-cursor`) when in connector mode.

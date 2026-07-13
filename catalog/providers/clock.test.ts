@@ -426,12 +426,19 @@ test("subscribe accepts clock.time.at with a Z offset and with a numeric +HH:MM 
   t.after(() => deleteSubscription(zSub.id));
   assert.equal(zSub.status, "pending");
 
-  // A future instant expressed with a numeric offset instead of Z.
+  // A future instant expressed with a numeric offset instead of Z. Same
+  // instant-shifting pattern as the +14:00 test above: the wall-clock
+  // digits in a +02:00 string are 2 HOURS AHEAD of the UTC instant they
+  // represent, so shift the actual instant by 2h (real Date arithmetic,
+  // so day/month/year rollover is handled correctly) before reading its
+  // wall-clock fields — naively adding 2 to getUTCHours() breaks for any
+  // instant whose UTC hour is 22 or 23 (produces an invalid hour 24/25).
   const offsetFuture = new Date(Date.now() + 60_000);
   const pad = (n: number) => String(n).padStart(2, "0");
+  const wallClockForOffset = new Date(offsetFuture.getTime() + 2 * 60 * 60 * 1000);
   const withOffset =
-    `${offsetFuture.getUTCFullYear()}-${pad(offsetFuture.getUTCMonth() + 1)}-${pad(offsetFuture.getUTCDate())}` +
-    `T${pad(offsetFuture.getUTCHours() + 2)}:${pad(offsetFuture.getUTCMinutes())}:${pad(offsetFuture.getUTCSeconds())}+02:00`;
+    `${wallClockForOffset.getUTCFullYear()}-${pad(wallClockForOffset.getUTCMonth() + 1)}-${pad(wallClockForOffset.getUTCDate())}` +
+    `T${pad(wallClockForOffset.getUTCHours())}:${pad(wallClockForOffset.getUTCMinutes())}:${pad(wallClockForOffset.getUTCSeconds())}+02:00`;
   const offsetSub = await subscribe({
     conversationId: `test:${randomUUID()}`,
     provider: "clock",

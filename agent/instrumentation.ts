@@ -15,7 +15,7 @@ import type { ReadableSpan, SpanExporter, SpanProcessor } from "@opentelemetry/s
 // usable during the demo. Errs toward KEEPING anything that might be part
 // of a real model/tool trace (ai.* spans, tool spans, agent/session
 // spans) — a kept junk span is much cheaper than a dropped real one.
-function isNoiseSpan(span: ReadableSpan): boolean {
+export function isNoiseSpan(span: ReadableSpan): boolean {
   const name = span.name;
   // LESSON (verified live, twice, 2026-07-13): NEVER drop a span that can be
   // a PARENT of real work. eve executes steps via internal HTTP
@@ -32,13 +32,22 @@ function isNoiseSpan(span: ReadableSpan): boolean {
   return false;
 }
 
-class FilteringSpanExporter implements SpanExporter {
-  constructor(private readonly inner: SpanExporter) {}
+export class FilteringSpanExporter implements SpanExporter {
+  private readonly inner: SpanExporter;
+  constructor(inner: SpanExporter) {
+    this.inner = inner;
+  }
   export(spans: ReadableSpan[], resultCallback: (result: { code: number; error?: Error }) => void): void {
-    this.inner.export(
-      spans.filter((span) => !isNoiseSpan(span)),
-      resultCallback,
-    );
+    const kept = spans.filter((span) => !isNoiseSpan(span));
+    // A whole batch filtered to nothing must complete locally: the installed
+    // LangSmith/OTLP stack does not special-case an empty array — it still
+    // serializes and sends the (zero-span) request, which the LangSmith
+    // OTLP endpoint 400s on ("trace_ids must be specified").
+    if (kept.length === 0) {
+      resultCallback({ code: 0 /* ExportResultCode.SUCCESS — @opentelemetry/core isn't a direct dep */ });
+      return;
+    }
+    this.inner.export(kept, resultCallback);
   }
   shutdown(): Promise<void> {
     return this.inner.shutdown();
@@ -84,18 +93,21 @@ class ThreadMetadataSpanProcessor implements SpanProcessor {
 // LANGSMITH_ENDPOINT from the environment itself (see .env.example) and
 // defaults the OTLP endpoint to `${LANGSMITH_ENDPOINT}/otel/v1/traces`.
 //
-// `spanProcessors` here does NOT replace the default export wiring: at
-// @vercel/otel's own SDK-registration layer, `traceExporter` is ALWAYS
-// wrapped in its own BatchSpanProcessor and appended after whatever
-// `spanProcessors` resolves to, regardless of whether "auto" is included
-// in that array (confirmed by reading @vercel/otel's own registration
-// logic directly, not assumed) — so adding ThreadMetadataSpanProcessor
-// here is additive, not a replacement of the exporter wiring.
+// `traceExporter` is ALWAYS wrapped in its own BatchSpanProcessor and
+// appended by @vercel/otel's own SDK-registration layer, regardless of
+// what `spanProcessors` resolves to — so the LangSmith export path above
+// is safe either way. But `spanProcessors` itself is NOT additive by
+// default: passing an explicit array (without "auto" in it) REPLACES
+// @vercel/otel's own default processors, including the Vercel-runtime
+// trace drain (BatchSpanProcessor(VercelRuntimeSpanExporter)). "auto" is
+// the literal @vercel/otel's SpanProcessorOrName type uses to mean
+// "include the default processors too" (@vercel/otel/dist/types/types.d.ts)
+// — it must stay in this array or the platform trace drain silently stops.
 export default defineInstrumentation({
   setup: ({ agentName }) =>
     registerOTel({
       serviceName: agentName,
       traceExporter: new FilteringSpanExporter(new LangSmithOTLPTraceExporter()),
-      spanProcessors: [new ThreadMetadataSpanProcessor()],
+      spanProcessors: [new ThreadMetadataSpanProcessor(), "auto"],
     }),
 });

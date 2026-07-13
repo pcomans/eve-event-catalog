@@ -42,7 +42,26 @@ const TEST_STREAM_URL = "wss://stream.data.alpaca.markets/v2/test";
 // (desired-membership.ts's readers + its own seedSymbolFromScratch) does
 // all of that independently, on its own discovery cadence. Read once at
 // module load, like every other env var here (KNOWN_ISSUES.md #2).
-const WATCHER_HOST = process.env.WATCHER_HOST === "connector" ? "connector" : "in-process";
+//
+// Fail closed on anything other than the two exact values: unset stays
+// "in-process" (an accepted deploy-checklist risk — see
+// docs/plan-vercel-production.md — not changed here), but a SET-and-wrong
+// value (a typo like "Connector" or "CONNECTOR") must never be silently
+// coerced to "in-process" — that would recreate, on a deployed connector
+// host, the exact split-brain (both hosts opening the account's streams)
+// this switch exists to prevent. Same fail-closed pattern as
+// assertCatalogApiSecretConfigured in catalog/auth.ts.
+const WATCHER_HOST = resolveWatcherHost(process.env.WATCHER_HOST);
+
+function resolveWatcherHost(value: string | undefined): "in-process" | "connector" {
+  if (value === undefined) return "in-process";
+  if (value === "in-process" || value === "connector") return value;
+  throw new Error(
+    `WATCHER_HOST=${JSON.stringify(value)} is invalid — must be exactly "in-process" or "connector" ` +
+      `(unset also defaults to "in-process"). Refusing to boot rather than silently treating an ` +
+      `unrecognized value as "in-process".`,
+  );
+}
 
 function log(line: string) {
   console.log(`[alpaca-stream] ${line}`);

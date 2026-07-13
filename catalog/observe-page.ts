@@ -219,12 +219,22 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
 
   // --- Live transcript panel ---
   var currentSessionId = null;
-  var transcriptTimer = null;
+  // Bumped on every watch() call. Every in-flight pump/retry checks its own
+  // generation before touching the DOM or scheduling more work, so calling
+  // watch() again (even with the same id) always retires the previous
+  // stream instead of running two pump loops side by side.
+  var watchGeneration = 0;
+  var activeAbortController = null;
+  var retryTimer = null;
 
   function setStatus(text) {
     document.getElementById("transcriptStatus").textContent = text;
   }
 
+  // Returns {div, bubble, meta} (or null for events with nothing to show)
+  // so callers can update an in-progress block's bubble in place instead of
+  // creating a new one — needed for reasoning.appended, whose reasoningSoFar
+  // is the full-so-far text, not a delta to append.
   function blockFor(type, data, at) {
     var div = document.createElement("div");
     var meta = document.createElement("div");
@@ -240,11 +250,12 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
       if (!data.message) return null;
       div.className = "block assistant";
       bubble.textContent = data.message;
-    } else if (type === "reasoning.completed" || type === "reasoning.appended") {
-      // the live stream emits reasoning.appended chunks (verified against a
-      // real session); .completed kept in case a replay path emits it
+    } else if (type === "reasoning.appended") {
       div.className = "block reasoning";
-      bubble.textContent = data.reasoning || data.text || data.delta || "";
+      bubble.textContent = data.reasoningSoFar || "";
+    } else if (type === "reasoning.completed") {
+      div.className = "block reasoning";
+      bubble.textContent = data.reasoning || "";
     } else if (type === "actions.requested") {
       div.className = "block tool";
       var names = (data.actions || []).map(function (a) {
@@ -268,64 +279,131 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
 
     div.appendChild(meta);
     div.appendChild(bubble);
-    return div;
+    return { div: div, bubble: bubble, meta: meta };
   }
 
-  function renderTranscript(text) {
-    var lines = text.split("\\n").filter(function (l) { return l.trim().length > 0; });
-    var container = document.getElementById("transcript");
-    var atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 40;
-    container.innerHTML = "";
-    lines.forEach(function (line) {
-      var evt;
-      try { evt = JSON.parse(line); } catch (e) { return; }
-      var el = blockFor(evt.type, evt.data || {}, evt.meta && evt.meta.at);
-      if (el) container.appendChild(el);
-    });
-    if (atBottom) container.scrollTop = container.scrollHeight;
+  // Stops whatever stream attempt is currently running (aborts its fetch,
+  // cancels its pending retry) and returns the new generation for the
+  // caller to start fresh with. Always bumps, even if the id is unchanged —
+  // that's what keeps a re-Watch from running two pump loops concurrently.
+  function stopCurrentStream() {
+    watchGeneration++;
+    if (activeAbortController) {
+      activeAbortController.abort();
+      activeAbortController = null;
+    }
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    return watchGeneration;
+  }
+
+  function scheduleRetry(generation, sessionId) {
+    if (generation !== watchGeneration) return;
+    retryTimer = setTimeout(function () {
+      retryTimer = null;
+      streamTranscript(generation, sessionId);
+    }, 2000);
   }
 
   // The session stream never closes (it's live) — await r.text() would hang
   // forever and the panel would stay empty. Read incrementally instead: one
-  // persistent connection, re-render on every chunk, auto-reconnect if it
-  // drops or the watched session changes.
-  function streamTranscript() {
-    if (!currentSessionId) return;
-    var sessionAtStart = currentSessionId;
+  // persistent connection, process each complete NDJSON line exactly once
+  // as it arrives, auto-reconnect if it drops or the watched session
+  // changes. The durable stream replays full history from index 0 on every
+  // (re)connect, so each connection attempt starts with a cleared panel.
+  function streamTranscript(generation, sessionId) {
+    if (generation !== watchGeneration) return;
+    var controller = new AbortController();
+    activeAbortController = controller;
     var buf = "";
-    fetch("/catalog/sessions/" + encodeURIComponent(currentSessionId) + "/stream")
+    var currentReasoningBlock = null;
+    var container = document.getElementById("transcript");
+    container.innerHTML = "";
+
+    function appendEvent(evt) {
+      var data = evt.data || {};
+      var metaText = ((evt.meta && evt.meta.at) ? evt.meta.at.slice(11, 19) + " — " : "") + evt.type;
+      var atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 40;
+
+      // Consecutive reasoning.appended events update the same bubble in
+      // place (reasoningSoFar is cumulative, not a delta); reasoning.completed
+      // finalizes it with the full text.
+      if (currentReasoningBlock && (evt.type === "reasoning.appended" || evt.type === "reasoning.completed")) {
+        currentReasoningBlock.bubble.textContent = evt.type === "reasoning.appended" ? (data.reasoningSoFar || "") : (data.reasoning || "");
+        currentReasoningBlock.meta.textContent = metaText;
+        if (evt.type === "reasoning.completed") currentReasoningBlock = null;
+        if (atBottom) container.scrollTop = container.scrollHeight;
+        return;
+      }
+
+      var block = blockFor(evt.type, data, evt.meta && evt.meta.at);
+      if (evt.type === "reasoning.appended") {
+        currentReasoningBlock = block;
+      } else if (isStepOrTurnBoundary(evt.type)) {
+        // eve emits reasoning.completed to close out each reasoning block —
+        // a tool call (actions.requested/action.result) can legitimately
+        // interleave BETWEEN a block's appended chunks and its completed
+        // event within the same step, so only step/turn/session boundaries
+        // reset the tracker. Clearing on every non-reasoning event (the
+        // original bug) meant reasoning.completed could never find the
+        // block a preceding tool call had orphaned, so it created a second,
+        // out-of-order bubble instead of finalizing the first one in place.
+        currentReasoningBlock = null;
+      }
+      if (!block) return;
+      container.appendChild(block.div);
+      if (atBottom) container.scrollTop = container.scrollHeight;
+    }
+
+    function isStepOrTurnBoundary(type) {
+      return type.indexOf("step.") === 0 || type.indexOf("turn.") === 0 || type.indexOf("session.") === 0;
+    }
+
+    fetch("/catalog/sessions/" + encodeURIComponent(sessionId) + "/stream", { signal: controller.signal })
       .then(function (r) {
+        if (generation !== watchGeneration) return;
         if (!r.ok || !r.body) throw new Error("stream " + r.status);
         var reader = r.body.getReader();
         var decoder = new TextDecoder();
         function pump() {
           return reader.read().then(function (res) {
-            if (sessionAtStart !== currentSessionId) { reader.cancel(); return; }
-            if (res.done) { setTimeout(streamTranscript, 2000); return; }
+            if (generation !== watchGeneration) return;
+            if (res.done) { scheduleRetry(generation, sessionId); return; }
             buf += decoder.decode(res.value, { stream: true });
-            renderTranscript(buf);
+            var lines = buf.split("\\n");
+            buf = lines.pop(); // partial tail — kept for the next chunk
+            lines.forEach(function (line) {
+              if (!line.trim()) return;
+              var evt;
+              try { evt = JSON.parse(line); } catch (e) { return; }
+              appendEvent(evt);
+            });
             return pump();
           });
         }
         return pump();
       })
-      .catch(function () {
-        if (sessionAtStart !== currentSessionId) return;
-        setStatus("stream error for session " + currentSessionId + " — retrying");
-        setTimeout(streamTranscript, 2000);
+      .catch(function (err) {
+        if (generation !== watchGeneration) return;
+        if (err && err.name === "AbortError") return;
+        setStatus("stream error for session " + sessionId + " — retrying");
+        scheduleRetry(generation, sessionId);
       });
   }
 
   function watch(idOrSession) {
     idOrSession = (idOrSession || "").trim();
     if (!idOrSession) return;
+    var generation = stopCurrentStream();
     fetch("/catalog/conversations/" + encodeURIComponent(idOrSession))
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (record) {
+        if (generation !== watchGeneration) return; // superseded by a newer watch() while resolving
         currentSessionId = record ? record.sessionId : idOrSession;
         setStatus("watching session " + currentSessionId + (record ? " (resolved from conversationId)" : " (raw sessionId)"));
-        document.getElementById("transcript").innerHTML = "";
-        streamTranscript();
+        streamTranscript(generation, currentSessionId);
       });
   }
 

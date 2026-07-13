@@ -77,3 +77,23 @@ test("arming many subscriptions under WATCHER_HOST=connector never opens any rea
   // network I/O was attempted at all.
   assert.ok(elapsedMs < 200, `expected near-instant no-op arms, took ${elapsedMs}ms — a real connection may have been attempted`);
 });
+
+// Codex gate finding 6 (2026-07-13): WATCHER_HOST must fail closed on a
+// SET-but-wrong value instead of silently treating it as "in-process" — a
+// typo like "Connector"/"CONNECTOR" on a deployed connector host would
+// otherwise make the eve app open its own Alpaca streams alongside the
+// connector, the exact split-brain this switch exists to prevent.
+//
+// Uses a cache-busting query string on the dynamic import (rather than the
+// bare "./alpaca.ts" the tests above use): a module whose evaluation throws
+// is permanently marked errored in Node's ESM cache, and every later
+// import() of the SAME resolved specifier re-throws that same error rather
+// than re-evaluating — importing plain "./alpaca.ts" here would poison the
+// module for the "connector" tests above/below if this test ran first, and
+// still risk contaminating the process if it ran after (Node does not
+// evict an errored module record). A unique query string resolves to a
+// distinct cache entry, so this import is genuinely independent.
+test("WATCHER_HOST rejects a set-but-invalid value instead of defaulting to in-process", async () => {
+  process.env.WATCHER_HOST = "CONNECTOR"; // case-mismatch typo, not the exact accepted string
+  await assert.rejects(() => import(`./alpaca.ts?watcher-host-invalid=${Date.now()}`), /WATCHER_HOST="CONNECTOR" is invalid/);
+});
