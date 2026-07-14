@@ -1,126 +1,106 @@
-# HANDOFF — read this first (rewritten 2026-07-13, post-demo gate round complete)
+# HANDOFF — read this first (rewritten 2026-07-14 ~00:45Z, Phases 1–4 complete)
 
 Entry point for the next session. Read `AGENTS.md` (hard rules incl. rule 9 heartbeat
-discipline), `METHOD.md` (how the team works, two postmortems), `KNOWN_ISSUES.md` (#11–#15
-recent; #2 and #14 got load-bearing addenda 2026-07-13 evening) before touching anything.
-Plan: `docs/plan-vercel-production.md`. Project memory:
+discipline), `METHOD.md` (how the lead/builder/Codex team operates, two postmortems),
+`KNOWN_ISSUES.md` (#2 and #14 have 2026-07-13 addenda; #15 is the retry-fork bug) before
+touching anything. Plan: `docs/plan-vercel-production.md`. Project memory:
 `~/.claude/projects/-Users-philipp-code-event-catalogue/memory/`.
 
 ## Where we are (big picture)
 
-- **Phases 1–3 of the production plan are BUILT and Codex-gated.** Phase 1 + clock provider +
-  the demo-day batch (now gated too, see below) are on `main`. Phases 2–3 (connector service,
-  gap replay, fencing, chain-guard + supervisor, EDGAR/expiry/recovery sweep workflows, pnpm
-  workspace) live on branch **`phase2-connector`** (151f698, pushed), built in the worktree
-  `../event-catalogue-phase2`. Its `HANDOFF-PHASE3.md` (worktree root, on the branch) is the
-  authoritative module-by-module state — its "nothing committed" final section is stale (the
-  branch commit happened after); everything else holds.
-- **The demo is over.** Dev server DOWN. `.workflow-data` purged (twice, during live checks) —
-  campaign-4's parked session is gone (orphaned by the gate round's instrumentation.ts edits,
-  an accepted cost; KNOWN_ISSUES #1). Campaign-4's **5 armed subscriptions are still in Redis**
-  (TSM/CVX crossings + TSM filing) with no session behind them — DELETE them before the next
-  campaign boots, or their fires will 404 into `failed` rows and spam the logs.
-  The Alpaca paper account still holds campaign-2's position (positions live in the account).
-- **The cloud is still empty by design**: no preview deployments; only the inert pre-cron
-  production shell at event-catalogue.vercel.app (open incident for Philipp below).
+**Phases 1–4 of the production plan are BUILT, Codex-gated, MERGED on `main` (5528136), and
+pushed.** That includes: the delivery backbone, clock provider, the connector runtime with
+run-forever chains and EDGAR/expiry/recovery sweeps (pnpm workspace), the demo-day observatory
+page (post-demo gate round: 8 findings fixed), and Phase 4's mandate agent — DeepSeek V4-Pro
+via AI Gateway, position-bounded sell tool, per-day turn cap, rewritten instructions,
+market-open schedule. Suite on main: **300/300** (serialized, `--test-concurrency=1`).
 
-## Post-demo checklist — steps 1–4 DONE (2026-07-13 evening), evidence inline
+**The standing campaign (campaign-5) is LIVE on Philipp's machine, running Phase 4 code**:
+dev server on :2000, caffeinate tied to the server PID, one perpetual conversation (locked
+decision), session parked on: a clock wake for **2026-07-14T13:30Z** (Tue 9:30 ET open), TSM
+exit-stop $400 / partial-profit $445 crossings, and a formTypes-filtered TSM filing watch.
+Account holds 9.335 TSM shares (campaign-2's buy) + ~$96k cash; the agent plans to evaluate
+adding TSM and a Micron starter at the open, ~$5–10k sizing. Live view:
+`localhost:2000/catalog/observe?conversation=campaign-5` — reasoning bubbles verified live on
+DeepSeek (its reasoning stream renders in-place, the page's headline feature works).
 
-1. **Demo confirmed over** (Philipp, in the resume prompt).
-2. **Suites green in both trees, server down**: main 155/155 pre-fix-round (159/159 after),
-   worktree 265/265 + root/connector typechecks + connector build (18 steps, 5 workflows).
-3. **Codex gate on the demo-day batch (031fb2b) — DONE, three narrow passes + re-verify**
-   (gpt-5.6-sol xhigh, file-append verdicts in `.codex-gate-demo-{a,b,c,rv,rv2}-findings.md`):
-   - Pass A (observe page + new routes): FAIL — 3 MED (reasoning.appended read nonexistent
-     fields; quadratic transcript rendering; leaked/overlapping stream readers). XSS, the
-     baggage wrapper, and the conversations route were explicitly CLEARED.
-   - Pass B (instrumentation): PASS — 2 LOW (empty filtered batch forwarded to the exporter —
-     cross-confirmed empirically by the harness; missing "auto" drops @vercel/otel's default
-     Vercel-runtime drain).
-   - Pass C (WATCHER_HOST): FAIL — 1 MED fixed now (set-but-invalid value silently meant
-     in-process → fail-closed `resolveWatcherHost`), 1 MED + 1 LOW deferred POST-MERGE as
-     task #27 (connector-mode test-feed `get_latest_price` gap → KNOWN_ISSUES #14 extension;
-     timing-based test assertion).
-   - Re-verify over the fix round: caught 1 more MED (reasoning tracker cleared by mid-step
-     tool calls → duplicate bubbles), fixed, focused re-check run on that delta.
-   - **8 findings fixed** across `catalog/observe-page.ts`, `agent/instrumentation.ts`,
-     `catalog/providers/alpaca.ts` (+ its test), `catalog/providers/clock.test.ts` (a latent
-     22:00–23:59-UTC-only day-rollover bug in the +02:00 offset case), with a real red-green
-     test for the exporter fix in `tests/agent-tools/instrumentation.test.ts`. Suite 159/159.
-4. **LangSmith exporter incident — CLOSED (environmental, not code).** Full evidence:
-   `spikes/langsmith-exporter-harness/FINDINGS.md`. The committed pipeline exports correctly
-   (proven offline AND with two real turns: conversation `fixcheck-1`, runs landed with
-   `thread_id`/`session_id` metadata). Failure signature reproduced: `LANGSMITH_TRACING` unset
-   → exporter reports success, ships nothing (KNOWN_ISSUES #6). Leading mechanism for the
-   16:17Z break: eve's env reload DELETES vars absent from a re-read (KNOWN_ISSUES #2 addendum,
-   repro in the spike's step6) — unprovable for the specific incident (env file since
-   overwritten), cleared by any fresh boot. Watch the Threads tab on the first campaign turns.
+**The cloud is still empty by design**: no preview deployments; only the inert accidental
+pre-cron production shell at event-catalogue.vercel.app (Philipp decided 2026-07-13: leave it
+until Phase 6 replaces it).
 
-## Remaining checklist (in order)
+## Operational invariants while the campaign runs locally (the expensive lessons)
 
-5. ~~Merge~~ **DONE (bd99644, pushed): merged, one KNOWN_ISSUES conflict resolved (both
-   addenda kept), merged tree 272/272 + both typechecks + connector build green, zero flakes
-   under the branch's `--test-concurrency=1` (which closed the wake.test.ts cross-file class
-   observed twice pre-merge).**
-6. ~~Relaunch~~ **DONE (2026-07-13 ~23:05Z): campaign-5 LIVE and parked** (session
-   `wrun_01KXEVN57ARCSWM6RC2KX4N8TN`), dev server up on :2000, `.workflow-data` purged
-   pre-launch (a leftover fixcheck-1 session was retry-spamming). First turn: rediscovered the
-   TSM position + $96k cash, researched (knows TSMC Q2 earnings land July 16), armed 4
-   subscriptions (market-open clock wake 2026-07-14T13:30Z — correctly Tuesday; TSM
-   crossings 412/432; TSM filing.new), placed no orders (market closed) — all verified in the
-   browser on the observe page, LangSmith runs landing with `thread_id=campaign-5`.
-   CAVEATS: (a) campaign-4's 5 stale armed rows are STILL in Redis — my deletion was
-   permission-blocked; Philipp must delete them (or approve deletion) before any connector
-   deploy, they're inert-but-visible until then; (b) the reasoning-bubble render is verified
-   against eve's types but still never exercised live — the current model emits no reasoning
-   events; close it out on Phase 4's model; (c) the laptop must stay awake for the campaign's
-   clock wake (caffeinate or power settings — Philipp's machine, Philipp's call).
-7. ~~Phase 4~~ **DONE (2026-07-14 ~00:05Z): built in worktree ../event-catalogue-phase4,
-   branch phase4-mandate (23c905a), three Codex gates (p4a/p4b/p4c, all FAIL→fixed→verified),
-   suite 300/300 lead-run, MERGED to main (fast-forward) and ROLLED OUT locally.** Campaign-5
-   now runs DeepSeek V4-Pro (parallelSearch auto-wired by eve for Gateway models — no override
-   code), has the position-bounded sell tool, per-day turn cap (MAX_TURNS_PER_DAY=200,
-   fail-open), rewritten mandate instructions, and the market-open schedule (inert locally —
-   eve dev never fires cron; the campaign's own clock re-subscription is the local wake).
-   Live-verified post-rollout: DeepSeek turn completed and parked (session
-   wrun_01KXEZ1Z3YK6BQ44W8AX1AF7RZ), re-armed 4 watches (open wake Tue 13:30Z; TSM exit-stop
-   400 / partial-profit 445 — the new exit-discipline instructions visibly working; TSM
-   filings with formTypes), LangSmith thread_id=campaign-5 landing, and the observe page's
-   reasoning bubbles VERIFIED live on real DeepSeek reasoning (the last owed fix-round check).
-   ROLLOUT LEFTOVERS: (a) schedule cron cadence + CAMPAIGN_CONVERSATION_ID env are Phase 6
-   deploy items; (b) 4 dead pre-upgrade campaign-5 rows sit armed in Redis (watchers died with
-   the restart; needs Philipp's deletion approval, same class as the campaign-4 cleanup);
-   (c) observe page: message.appended label flood under DeepSeek (task #28, Phase 5 seed);
-   (d) the agent's summary called Tue 7/14 "Monday" — label-only, armed timestamps correct.
-   Then: **Phase 5** (observatory — observe page is the seed; task #28 first), **Phase 6**
-   (deploy: WATCHER_HOST=connector — now fail-closed on typos — CATALOG_API_SECRET +
-   CAMPAIGN_CONVERSATION_ID to prod, CATALOG_BASE_URL now auto-derives from VERCEL_URL, #7
-   re-verification, task #27 BEFORE the cloud E2E if it uses the test feed, cloud E2E ×2 in
-   market hours, one unattended day, THEN the link goes to Pranay).
-8. Backlog: task #21 (idempotent subscribe_event), task #27 (post-merge gate-C deferrals),
-   marker-aware stubs to restore test parallelism, workflow run cancellation path, Deployment
-   Protection dashboard toggle (Philipp), Phase-6 note: any explicit forceFlush added for
-   serverless suspend MUST catch rejections (see FINDINGS.md — provider-level forceFlush
-   propagates; empty batches used to 400 pre-fix).
+1. **Any file edit in this worktree hot-reloads the dev server** (KNOWN_ISSUES #2) and can
+   orphan the parked campaign session (#1). Build ANYTHING nontrivial in a separate git
+   worktree on a branch (Phase 2/3 used `../event-catalogue-phase2`, Phase 4 used
+   `../event-catalogue-phase4`); merge + controlled rollout after gates.
+2. **`pnpm test` requires the dev server DOWN** (#11) — and stopping/restarting the server
+   kills the campaign's IN-PROCESS timers and stream watchers (clock wakes, crossings, EDGAR
+   poll). After any restart: send campaign-5 ONE re-arm turn via POST /catalog/chat ("watchers
+   reset by restart — re-subscribe to what you still want, including your next market-open
+   wake"). Its old armed rows become permanent corpses (no unsubscribe tool — backlog); their
+   deletion is Philipp-approval-gated (the auto-classifier blocks registry-delete scripts;
+   he has approved this class twice — ask, don't assume).
+3. **Purge `.workflow-data` only when channel/instrumentation/agent files changed** since the
+   parked session was created (that's what orphans it) — purging costs the conversation its
+   MEMORY (the perpetual-conversation continuity), so don't purge on a plain restart.
+4. **Codex gates need `--write`** on the companion CLI, scoped in the prompt to the findings
+   file — the default read-only sandbox silently blocks the file-append verdict protocol
+   (learned in gate pass A). Run worktree gates from that worktree's cwd (own broker tree).
+5. **`vercel env pull` refreshes OIDC (~12h)** — server down first, always. AI Gateway auth
+   locally rides VERCEL_OIDC_TOKEN (no AI_GATEWAY_API_KEY provisioned; probe-verified).
 
-## Open incidents for Philipp's review
+## First thing on resume: check the campaign is alive
 
-- **Accidental production deploy** (2026-07-13 ~05:00Z, KNOWN_ISSUES #13): inert 404 shell
-  holds event-catalogue.vercel.app. Decide: leave until Phase 6 replaces it, or delete.
+If resuming after 2026-07-14 13:30Z: verify the market-open wake actually fired (observe page
+event feed, or GET /catalog/subscriptions — the clock row should be `fired`; LangSmith Threads
+`thread_id=campaign-5` shows the turn). If the laptop slept or the server died, the campaign
+dead-ended SILENTLY — restart the server, purge nothing, send the one re-arm turn (invariant
+2), and note the gap honestly in the campaign record. Silence is a failure signal (AGENTS.md
+rule 9) — this applies to the campaign itself, not just builders.
+
+## Next work, in order
+
+1. **Phase 5 — public observatory** (plan lines ~264-275). Task #28 FIRST (DeepSeek's
+   message.appended deltas flood the transcript with empty type-label blocks —
+   catalog/observe-page.ts, safe leaf file, coalesce in-place like the reasoning fix or skip).
+   Then the real pages: campaign view (equity curve/positions/P&L — load the dataviz skill),
+   subscriptions table, event feed, decision view threading transcripts into the timeline.
+   UI base: evaluate vercel/chatbot ONLY via a time-boxed spike if it reduces work (Philipp's
+   directive; likely value is message-rendering components, not the skeleton). Audience is a
+   Vercel engineer — presentation quality matters.
+2. **Phase 6 — deploy + cloud E2E + campaign launch** (plan lines ~277+). Mandatory env on the
+   deployed eve app: WATCHER_HOST=connector (now fail-closed on typos), CATALOG_API_SECRET,
+   CAMPAIGN_CONVERSATION_ID (the market-open schedule reads it; schedule cron never fires in
+   eve dev, so its cadence is rollout-verified here). CATALOG_BASE_URL auto-derives from
+   VERCEL_URL since p4c. Task #27 BEFORE the cloud E2E if it uses the test feed. KNOWN_ISSUES
+   #7 re-verification on world-vercel. Preview deploys: verify target via `vercel inspect`,
+   ALWAYS (#13). Cloud E2E ×2 in market hours, one unattended market day, THEN the link goes
+   to Pranay.
+3. Backlog: #21 (idempotent subscribe_event), #27 (gate-C deferrals), #28 (if not done in
+   Phase 5 kickoff), marker-aware stubs to restore test parallelism, workflow run-cancellation
+   path, an unsubscribe tool (corpse-row problem), Deployment Protection toggle (Philipp),
+   winter-DST schedule gap (fires 8:30 ET after the November time change — documented in
+   agent/schedules/market-open.ts).
 
 ## Decisions locked (do not re-litigate; full list in plan + memory)
 
 Three-service Vercel Services topology · durable sleep for timers · chain-claim +
-supervisor-cron (KNOWN_ISSUES #15) · DeepSeek V4-Pro + gateway parallelSearch · ONE perpetual
-campaign conversation · Deployment Protection OFF · LangSmith paid plan active · buy-only until
-Phase 4's sell tool · WATCHER_HOST unset defaults to in-process (accepted deploy-checklist
-risk; set-but-invalid now fails the boot).
+supervisor-cron (#15) · DeepSeek V4-Pro (`deepseek/deepseek-v4-pro`, legacy aliases deprecate
+2026-07-24) + Gateway parallelSearch (auto-wired by eve for Gateway models — no override code;
+escalation path: gpt-5.6-terra + native webSearch) · ONE perpetual campaign conversation ·
+Deployment Protection OFF · buy + position-bounded sell, no shorting/margin, paper only ·
+guardrails = turn cap only (MAX_TURNS_PER_DAY=200, fail-OPEN on cap-store errors — lead
+decision, p4b) · oversell REJECTED not clamped · production shell stays until Phase 6.
 
 ## Team state
 
-phase1-builder: STOOD DOWN permanently (do not resume — METHOD.md postmortem).
-phase3-builder: holding; knows the worktree best; owes nothing. One writer per worktree, ever.
-harness-builder + fix-builder (this session): both STOOD DOWN with explicit no-reactivation
-protocol; reactivation requires the literal phrase "REACTIVATE <name>".
-Codex runtime: healthy; gates run via the companion CLI with `--write` scoped to the findings
-file (a read-only sandbox blocks the file-append protocol — learned pass A).
+ALL prior builders are STOOD DOWN permanently with the explicit no-reactivation protocol:
+phase1-builder, phase3-builder, harness-builder, fix-builder, phase4-builder. A message to any
+of them RESUMES it (METHOD.md postmortem) — never message them; reactivation requires the
+literal phrase "REACTIVATE <name>", which only Philipp or the lead should ever decide to use.
+One writer per worktree, ever. The `../event-catalogue-phase2` and `../event-catalogue-phase4`
+worktrees are merged and redundant — safe to `git worktree remove` (phase4's has untracked
+.codex-gate-p4* scratch files; the equivalent demo-round files sit untracked in the main tree
+too — session scratch by convention, never committed, content summarized here and in commits).
+Codex runtime: healthy; narrow passes; file-append verdicts; `--write` required (invariant 4).
