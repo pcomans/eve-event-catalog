@@ -20,6 +20,7 @@ import {
 import { assertCatalogHonesty } from "#catalog/catalog.ts";
 import { assertCatalogApiSecretConfigured, isAuthorizedHeader } from "#catalog/auth.ts";
 import { listEvents } from "#catalog/history.ts";
+import { incrementAndCheckTurnCap } from "#catalog/turn-cap.ts";
 // Side-effecting imports: register the alpaca and edgar providers
 // (registerProvider(...)) at module load. ES module imports fully evaluate
 // before this file's own top-level code runs, so assertCatalogHonesty()
@@ -70,6 +71,27 @@ function requireAuth(req: Request): Response | null {
   return Response.json({ error: "unauthorized: missing or invalid bearer token" }, { status: 401 });
 }
 
+/**
+ * Runaway/loop protection (turn-cap.ts), not a cost cap — a per-UTC-day
+ * ceiling on turns started, checked BEFORE send() at both entry points that
+ * start a turn (POST /catalog/chat, POST /catalog/wake) so a turn that would
+ * exceed it never reaches send() at all. 429, deliberately not 400/404: a
+ * wake route caller is deliverWake (catalog/wake.ts), whose only two
+ * PERMANENT-failure statuses are 400 (guidance-rejected) and 404
+ * (unknown-conversation) — a 429 here is treated as retryable, leaving the
+ * subscription "delivering" for the recovery sweep to retry once the day
+ * rolls over (or the cap is raised), exactly like any other transient error.
+ */
+async function checkTurnCap(): Promise<Response | null> {
+  const cap = await incrementAndCheckTurnCap();
+  if (cap.allowed) return null;
+  log(`turn-cap REJECTED count=${cap.count} limit=${cap.limit}`);
+  return Response.json(
+    { error: `daily turn cap reached (${cap.count}/${cap.limit}) — runaway/loop protection, resets at UTC midnight` },
+    { status: 429 },
+  );
+}
+
 export default defineChannel({
   routes: [
     POST("/catalog/chat", async (req, { send }) => {
@@ -80,6 +102,9 @@ export default defineChannel({
         conversationId: string;
         message: string;
       };
+
+      const capExceeded = await checkTurnCap();
+      if (capExceeded) return capExceeded;
 
       const session = await withConversationBaggage(conversationId, () =>
         send(message, { auth: null, continuationToken: conversationId }),
@@ -168,6 +193,11 @@ export default defineChannel({
           { status: 404 },
         );
       }
+
+      // Checked before the delivery claim below, so a rejected wake never
+      // takes (and then has to release) a claim it was never going to use.
+      const capExceeded = await checkTurnCap();
+      if (capExceeded) return capExceeded;
 
       // Route-side dedupe by subscriptionId (correctness prerequisite 4:
       // "queue consumers dedupe by subscriptionId"), two-phase: claim the

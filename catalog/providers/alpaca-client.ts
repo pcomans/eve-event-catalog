@@ -103,13 +103,17 @@ export async function getPositions(): Promise<AlpacaPosition[]> {
   }));
 }
 
-export interface SubmitOrderInput {
+// Mirrors the Alpaca SDK's own QtyOnly/NotionalOnly split on MarketOrderInput
+// (exactly one of qty/notional, never both) — buy orders in this codebase
+// size by notional (agent/tools/submit_order.ts), sell orders size by qty,
+// rejected outright (never clamped) if it exceeds the held position
+// (agent/tools/submit_sell_order.ts's assertSellWithinPosition).
+export type SubmitOrderInput = {
   symbol: string;
   side: "buy" | "sell";
   type: "market";
   time_in_force: "day";
-  notional: string;
-}
+} & ({ notional: string; qty?: never } | { qty: string; notional?: never });
 
 export interface AlpacaOrder {
   id: string;
@@ -149,11 +153,11 @@ export async function submitOrder(input: SubmitOrderInput): Promise<AlpacaOrder>
   // input.type/time_in_force describe this seam's (deliberately narrow)
   // input contract for callers, not passed through literally — the ergonomic
   // builder only ever places market orders and defaults timeInForce to "day".
-  const order = await alpacaClient.trading.orders.market({
-    symbol: input.symbol,
-    side: input.side,
-    notional: input.notional,
-  });
+  const order = await alpacaClient.trading.orders.market(
+    input.notional !== undefined
+      ? { symbol: input.symbol, side: input.side, notional: input.notional }
+      : { symbol: input.symbol, side: input.side, qty: input.qty },
+  );
   return normalizeOrder(order);
 }
 

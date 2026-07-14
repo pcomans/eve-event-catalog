@@ -240,7 +240,35 @@ export async function logAndRecord(
 // same route over HTTP rather than duplicating its logic — the channel route
 // and internal callers share one code path, just as an external synthetic
 // wake (AT-2) would.
-const CATALOG_BASE_URL = process.env.CATALOG_BASE_URL ?? `http://localhost:${process.env.PORT ?? 2000}`;
+/**
+ * Pure precedence logic for CATALOG_BASE_URL (Codex gate finding, fix round
+ * p4c, MED): the plain `?? localhost:$PORT` fallback this replaced is
+ * correct ONLY in local dev — a deployed Vercel Function has nothing
+ * listening on localhost, so a schedule/wake loopback with no explicit
+ * override used to throw before the route it's calling could even run (only
+ * the outer task failure was observable). Precedence:
+ * (a) an explicit CATALOG_BASE_URL always wins;
+ * (b) on Vercel, `VERCEL_URL` is injected automatically (hostname only, no
+ *     protocol — Vercel's own convention), so this derives
+ *     `https://${VERCEL_URL}`;
+ * (c) local dev falls back to `http://localhost:$PORT` (PORT itself
+ *     defaulting to 2000, eve's own default).
+ * `env` is passed in so this is testable without touching process.env — see
+ * catalog/wake-base-url.test.ts (kept out of wake.test.ts on purpose: that
+ * file's other tests exercise deliverWake/delivering state and aren't safe
+ * to run solo, per this project's process rules — a pure function like this
+ * one shouldn't be bundled into that same all-or-nothing file).
+ */
+export function resolveCatalogBaseUrl(env: Record<string, string | undefined>): string {
+  if (env.CATALOG_BASE_URL) return env.CATALOG_BASE_URL;
+  if (env.VERCEL_URL) return `https://${env.VERCEL_URL}`;
+  return `http://localhost:${env.PORT ?? 2000}`;
+}
+
+// Exported for agent/schedules/market-open.ts, the other internal caller
+// that self-POSTs into this same running server (see that file's own
+// comment) — one definition of "how do we reach ourselves," not duplicated.
+export const CATALOG_BASE_URL = resolveCatalogBaseUrl(process.env);
 
 const expiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
