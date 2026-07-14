@@ -10,6 +10,8 @@ import {
   getConversation,
   getConversationBySessionId,
   getSubscription,
+  getSubscriptions,
+  listSubscriptions,
   listSubscriptionsByStatus,
   readDueExpirySubscriptionIds,
   recordConversation,
@@ -22,9 +24,12 @@ import {
 // gone, the chain returns null whether or not the reverse key itself was
 // cleaned up — checking the key directly is the only way to catch a leak
 // that's harmless today but would waste Redis storage over a long-running
-// dev session.
+// dev session. SUB_KEY is redefined here for the same reason (peeking at a
+// record's own raw key, not exported from registry.ts) — see
+// "listSubscriptions" tests below.
 const redis = Redis.fromEnv();
 const CONV_BY_SESSION_KEY = (sessionId: string) => `catalog:conv-by-session:${sessionId}`;
+const SUB_KEY = (id: string) => `catalog:sub:${id}`;
 
 // These tests hit a real Redis instance (Upstash, via UPSTASH_REDIS_REST_URL /
 // UPSTASH_REDIS_REST_TOKEN) — no mocking, per the registry's job (survive
@@ -122,6 +127,123 @@ test("listSubscriptionsByStatus filters by conversation and status", async (t) =
     pendingForConversation.map((s) => s.id),
     [pending.id],
   );
+});
+
+// Task #33 (Redis command-burn reduction): listSubscriptions moved from an
+// smembers + N-per-id GET fan-out to smembers + one MGET. These two tests
+// pin the exact correctness contract that migration must preserve —
+// written before the mget rewrite, run again unmodified after it.
+test("listSubscriptions returns every subscription currently in the index", async (t) => {
+  const a = await createSubscription({
+    conversationId: testConversationId(),
+    provider: "alpaca",
+    event: "price.crossesBelow",
+    resource: "NVDA",
+    params: { threshold: 150 },
+    expiresAt: null,
+  });
+  const b = await createSubscription({
+    conversationId: testConversationId(),
+    provider: "edgar",
+    event: "filing.new",
+    resource: "AAPL",
+    params: {},
+    expiresAt: null,
+  });
+  t.after(() => Promise.all([deleteSubscription(a.id), deleteSubscription(b.id)]));
+
+  const all = await listSubscriptions();
+  const ids = new Set(all.map((s) => s.id));
+  assert.ok(ids.has(a.id));
+  assert.ok(ids.has(b.id));
+});
+
+// The index (SUB_INDEX_KEY, an sadd'd set) and each subscription's own
+// record are two separate keys — deleteSubscription's own comment already
+// notes it's a test-hygiene helper "not used by product code," so in real
+// operation nothing ever removes an id from the index without also writing
+// its record. This test simulates the state that WOULD result if it did
+// (or if a record were manually DEL'd outside deleteSubscription): the
+// current implementation's `.filter((sub): sub is Subscription => sub !==
+// null)` silently drops it rather than throwing or returning a hole in the
+// array — mget must preserve that exact behavior (real Redis MGET returns
+// nil in the missing key's position, same shape as a missing GET).
+test("listSubscriptions silently drops an index entry whose record no longer exists", async (t) => {
+  const live = await createSubscription({
+    conversationId: testConversationId(),
+    provider: "alpaca",
+    event: "price.crossesAbove",
+    resource: "NVDA",
+    params: { threshold: 200 },
+    expiresAt: null,
+  });
+  const orphaned = await createSubscription({
+    conversationId: testConversationId(),
+    provider: "alpaca",
+    event: "price.crossesAbove",
+    resource: "TSLA",
+    params: { threshold: 300 },
+    expiresAt: null,
+  });
+  t.after(() => Promise.all([deleteSubscription(live.id), deleteSubscription(orphaned.id)]));
+
+  // Deletes only the record, leaving `orphaned.id` behind in the index —
+  // the exact "deleted id still in index" case, without deleteSubscription's
+  // own index cleanup masking it.
+  await redis.del(SUB_KEY(orphaned.id));
+
+  const all = await listSubscriptions();
+  const ids = new Set(all.map((s) => s.id));
+  assert.ok(ids.has(live.id), "the live subscription must still be returned");
+  assert.ok(!ids.has(orphaned.id), "the orphaned index entry must be silently dropped, not throw");
+});
+
+// getSubscriptions is listSubscriptions' underlying batched-by-id read,
+// also reused by catalog/providers/expiry-sweep.ts's runExpirySweepTick
+// (task #33 — that call site used to be one GET per due id).
+test("getSubscriptions: order-preserving batch read, one MGET for the whole list", async (t) => {
+  const a = await createSubscription({
+    conversationId: testConversationId(),
+    provider: "alpaca",
+    event: "price.crossesBelow",
+    resource: "NVDA",
+    params: { threshold: 150 },
+    expiresAt: null,
+  });
+  const b = await createSubscription({
+    conversationId: testConversationId(),
+    provider: "edgar",
+    event: "filing.new",
+    resource: "AAPL",
+    params: {},
+    expiresAt: null,
+  });
+  t.after(() => Promise.all([deleteSubscription(a.id), deleteSubscription(b.id)]));
+
+  const [first, second] = await getSubscriptions([a.id, b.id]);
+  assert.equal(first?.id, a.id);
+  assert.equal(second?.id, b.id);
+});
+
+test("getSubscriptions: a missing id comes back null in its own position, order preserved for the rest", async (t) => {
+  const a = await createSubscription({
+    conversationId: testConversationId(),
+    provider: "alpaca",
+    event: "price.crossesAbove",
+    resource: "NVDA",
+    params: { threshold: 200 },
+    expiresAt: null,
+  });
+  t.after(() => deleteSubscription(a.id));
+
+  const results = await getSubscriptions([a.id, "does-not-exist", a.id]);
+  assert.equal(results[0]?.id, a.id);
+  assert.equal(results[1], null);
+  assert.equal(results[2]?.id, a.id);
+});
+
+test("getSubscriptions: an empty id list short-circuits without calling Redis", async () => {
+  assert.deepEqual(await getSubscriptions([]), []);
 });
 
 test("recordConversation preserves the original startedAt across repeat calls", async (t) => {

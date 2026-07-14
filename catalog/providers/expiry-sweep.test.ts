@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 
+import { Redis } from "@upstash/redis";
+
 import { createSubscription, deleteSubscription, getSubscription, tryTransitionToDelivering, updateSubscription } from "../registry.ts";
 import type { Subscription } from "../types.ts";
 import { runExpirySweepTick, type DeliverExpiredWake } from "./expiry-sweep.ts";
@@ -9,6 +11,11 @@ import { runExpirySweepTick, type DeliverExpiredWake } from "./expiry-sweep.ts";
 function testConversationId(): string {
   return `test:${randomUUID()}`;
 }
+
+// Peeks at the raw record key — same convention as registry.test.ts's own
+// SUB_KEY redefinition (not exported from registry.ts).
+const redis = Redis.fromEnv();
+const SUB_KEY = (id: string) => `catalog:sub:${id}`;
 
 async function armedSubWithExpiry(conversationId: string, expiresAt: string): Promise<Subscription> {
   const sub = await createSubscription({
@@ -103,4 +110,33 @@ test("two concurrent sweep ticks racing the same due subscription deliver exactl
   assert.equal(deliveredForSub.length, 1, "exactly one of the two concurrent ticks must win — never zero, never doubled");
   const stored = await getSubscription(sub.id);
   assert.equal(stored?.status, "expired");
+});
+
+// Task #33 (Redis command-burn reduction): runExpirySweepTick's per-id
+// getSubscription loop became one batched read (registry.ts's
+// getSubscriptions, an MGET) — this pins the exact case that batching must
+// not regress: a due id whose record was deleted between the expiry-index
+// read and this read (simulated here the same way registry.test.ts does,
+// deleting only the record and leaving the expiry-index entry behind) must
+// still be logged and skipped, not thrown, and must never starve a
+// healthy due subscription delivered in the SAME batched read.
+test("runExpirySweepTick skips a due id whose record no longer exists, without starving the rest of the batch", async (t) => {
+  const conversationId = testConversationId();
+  const healthy = await armedSubWithExpiry(conversationId, "2020-01-01T00:00:00.000Z");
+  t.after(() => deleteSubscription(healthy.id));
+  const orphaned = await armedSubWithExpiry(conversationId, "2020-01-01T00:00:00.000Z");
+  t.after(() => deleteSubscription(orphaned.id));
+
+  // Deletes only the record, leaving orphaned.id behind in the expiry
+  // index — deleteSubscription would also clean the index, masking this.
+  await redis.del(SUB_KEY(orphaned.id));
+
+  const delivered: Subscription[] = [];
+  await runExpirySweepTick(realCasDeliver((s) => delivered.push(s)), Date.now());
+
+  assert.ok(
+    delivered.some((s) => s.id === healthy.id),
+    "the healthy due subscription must still be delivered despite the orphaned neighbor",
+  );
+  assert.ok(!delivered.some((s) => s.id === orphaned.id));
 });

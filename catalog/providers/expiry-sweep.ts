@@ -1,4 +1,4 @@
-import { getSubscription, readDueExpirySubscriptionIds } from "../registry.ts";
+import { getSubscriptions, readDueExpirySubscriptionIds } from "../registry.ts";
 import type { Subscription } from "../types.ts";
 
 // Phase 3's expiry migration (docs/plan-vercel-production.md): the durable
@@ -36,6 +36,14 @@ export type DeliverExpiredWake = (sub: Subscription) => Promise<void>;
  * or any other unexpected error) is logged and skipped, not a reason to
  * abort the rest of the tick — same "one poison row must not starve the
  * round" philosophy as wake.ts's own sweepStrandedDeliveries.
+ *
+ * Task #33 (Redis command-burn reduction): the per-id read below used to be
+ * one GET per due id; getSubscriptions batches the whole due list into one
+ * MGET. That batch read is its own try/catch, separate from the per-row
+ * loop's — a Redis error on the BATCH read has no per-row data to isolate
+ * (unlike a single row's delivery throwing), so it's logged and this tick
+ * simply delivers nothing rather than crashing the workflow step; the next
+ * tick re-reads the same still-due ids from the expiry index and retries.
  */
 export async function runExpirySweepTick(deliver: DeliverExpiredWake, nowMs: number = Date.now()): Promise<void> {
   const dueIds = await readDueExpirySubscriptionIds(nowMs);
@@ -43,9 +51,19 @@ export async function runExpirySweepTick(deliver: DeliverExpiredWake, nowMs: num
 
   log(`sweep due=${dueIds.length}`);
 
-  for (const id of dueIds) {
+  let subs: (Subscription | null)[];
+  try {
+    subs = await getSubscriptions(dueIds);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`expiry-sweep-batch-read-failed count=${dueIds.length} error=${message}`);
+    return;
+  }
+
+  for (let i = 0; i < dueIds.length; i++) {
+    const id = dueIds[i];
+    const sub = subs[i];
     try {
-      const sub = await getSubscription(id);
       if (!sub) {
         log(`expiry-sweep-row-skipped sub=${id} — no longer exists`);
         continue;

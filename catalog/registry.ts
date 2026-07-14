@@ -223,10 +223,26 @@ export async function tryTransitionToDelivering(
   return null; // exhausted retries under real contention; treat as lost, same as any other race loss
 }
 
+/**
+ * Batched read of multiple subscriptions by id — one MGET, not one GET per
+ * id (task #33, Redis command-burn reduction). Order-preserving: result[i]
+ * corresponds to ids[i], `null` for an id with no record (same per-key
+ * semantics a bare `redis.get` has for a missing key). Empty input
+ * short-circuits without a Redis call — MGET with zero keys is a
+ * wire-protocol error, not just a harmless no-op.
+ */
+export async function getSubscriptions(ids: string[]): Promise<(Subscription | null)[]> {
+  if (ids.length === 0) return [];
+  return redis.mget<(Subscription | null)[]>(ids.map(SUB_KEY));
+}
+
+// Used to be smembers + one GET per id (N+1 round trips — the dominant cost
+// behind the 768k-read quota hit). Now smembers + one MGET via
+// getSubscriptions above.
 export async function listSubscriptions(): Promise<Subscription[]> {
   const ids = await redis.smembers(SUB_INDEX_KEY);
   if (ids.length === 0) return [];
-  const subs = await Promise.all(ids.map((id) => redis.get<Subscription>(SUB_KEY(id))));
+  const subs = await getSubscriptions(ids);
   return subs.filter((sub): sub is Subscription => sub !== null);
 }
 

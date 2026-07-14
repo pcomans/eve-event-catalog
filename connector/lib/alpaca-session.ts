@@ -37,10 +37,12 @@ import {
   padTimestampToNanoseconds,
   partitionByCursorReadiness,
   replayThroughCrossingPredicate,
+  shouldPersistCursorNow,
   type ReplayTrade,
 } from "../../catalog/providers/gap-replay.ts";
-import { readCursor, writeCursorFenced, type PersistedCursor } from "../../catalog/providers/gap-replay-cursor.ts";
+import { readCursor, writeCursorFenced, type PersistedCursor, type WriteCursorResult } from "../../catalog/providers/gap-replay-cursor.ts";
 import { acquireFenceToken } from "../../catalog/providers/fence-redis.ts";
+import { createSerialQueue, type SerialQueue } from "./serial-queue.ts";
 import { computeMembershipDelta } from "../../catalog/providers/membership-delta.ts";
 import {
   readDesiredAlpacaOrderSubscriptions,
@@ -71,6 +73,21 @@ const TRADING_STREAM_ID = "connector:alpaca-trading-stream";
 
 const MEMBERSHIP_CHECK_CADENCE_MS = 15_000; // prereq 3's own cadence (catalog/providers/membership-delta.ts)
 const TEST_FEED_FIRST_TICK_TIMEOUT_MS = 30_000;
+
+// Task #33 (Redis command-burn reduction, quota postmortem): a persisted
+// cursor is only READ on reconnect/session-start (seedFromCursorReplay),
+// never on the live path — writing it on every single trade tick (one SET
+// per trade, per watched symbol) was the single largest contributor to
+// Redis write volume during active market hours. See handleLiveTrade's own
+// comment for the throttle mechanics and why a reconnect replaying up to
+// this many ms of already-live-processed trades is safe, not a new
+// correctness risk.
+const CURSOR_WRITE_THROTTLE_MS = 5000;
+// p6d gate fix, round 2: the single fixed key every replayAfterStockReconnect
+// call is queued under (ctx.replayQueue) — one replay "lane" per session,
+// not one per symbol, since a single call already walks every watched
+// symbol itself.
+const REPLAY_QUEUE_KEY = "stock-reconnect-replay";
 const TEST_FEED_POLL_INTERVAL_MS = 100;
 // p2v Codex gate finding 9: reconciling every watched order on EVERY 15s
 // cadence tick, with no bound, can stretch a single tick's REST calls past
@@ -112,10 +129,34 @@ interface SessionContext {
   orderReconciliationOffset: number;
   /** Fire-and-forget deliveries launched from stream event callbacks — drained (via drainPendingWrites, a fixed-point loop) before the session disconnects, so a late tick's delivery isn't abandoned mid-flight (Codex gate finding). */
   pendingWrites: Promise<void>[];
+  /** Task #33: the MOST RECENT cursor+price seen per symbol, updated synchronously on every live trade regardless of whether this tick's write is actually throttled — flushPendingCursors reads this at step-end so a clean session boundary always persists the latest state even if it arrived inside a throttle window. */
+  pendingCursorBySymbol: Map<string, PersistedCursor>;
+  /** Task #33: wall-clock ms of the last cursor write ACTUALLY sent to Redis, per symbol — shouldPersistCursorNow's own input, not touched by a throttled-away tick. */
+  cursorLastPersistedAtMsBySymbol: Map<string, number>;
+  /** p6d gate fix: every writeCursorFenced call for a symbol is queued through this (serial-queue.ts) so two writes for the SAME symbol can never be in flight at once — gap-replay-cursor.ts's own read-compare-write regression guard is only safe under that guarantee (Codex proved genuine concurrent writers exist: a delayed live write racing the final flush, an in-flight replay racing a reconnect-triggered flush). One queue per session, shared by all three writer paths. Keyed BY SYMBOL — deliberately a SEPARATE queue from replayQueue below (different key space, different purpose: this one serializes Redis writes, that one serializes whole replay tasks) rather than overloading one Map with two unrelated kinds of key. */
+  cursorWriteQueue: SerialQueue;
+  /** p6d gate fix, round 2: serializes replayAfterStockReconnect itself — a flapping connection firing onReconnected more than once could otherwise start overlapping replay tasks, which race ctx.seedingSymbols' add/delete pairs and ctx.watchesBySubId's shared PriceWatch.previous across tasks (found while evaluating whether the cursor-write serializer covered this too — it doesn't, this is separate shared state). Always called with the SAME fixed key (REPLAY_QUEUE_KEY below) — there is only ever one replay "lane" per session, not one per symbol, since a single replayAfterStockReconnect call already walks every watched symbol itself. */
+  replayQueue: SerialQueue;
+  /** p6d gate fix: set once, at the very start of the session's shutdown sequence (runFencedAlpacaSession's finally) — handleLiveTrade checks this FIRST and returns immediately once set. Exists because Codex proved stockStream.disconnect() is NOT a quiescence barrier (verified against the installed SDK: a frame already queued, or received while the socket is closing, can still synchronously reach the trade handler after disconnect() returns) — this flag is the actual local input gate, disconnect() is just best-effort network teardown alongside it. replayAfterStockReconnect also checks this itself (see its own comment) so a replay already queued-but-not-yet-started at shutdown resolves as a fast no-op instead of running a full, pointless replay right as the session tears down.
+   */
+  shuttingDown: boolean;
 }
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * p6d gate fix: the ONLY way any of this file's three writer paths
+ * (handleLiveTrade, seedFromCursorReplay, flushPendingCursors) may call
+ * writeCursorFenced — queued through ctx.cursorWriteQueue so writes for the
+ * SAME symbol always run one at a time, in enqueue order, regardless of
+ * which path started them or how long each takes. See STOCK_STREAM_ID's
+ * own writeCursorFenced doc comment for why serialization (not just the
+ * read-compare-write guard alone) is the actual correctness guarantee.
+ */
+function writeCursorSerialized(ctx: SessionContext, symbol: string, value: PersistedCursor): Promise<WriteCursorResult> {
+  return ctx.cursorWriteQueue.run(symbol, () => writeCursorFenced(STOCK_STREAM_ID, ctx.stockFenceToken, symbol, value));
 }
 
 // --- price-crossing leg --------------------------------------------------
@@ -271,8 +312,28 @@ async function seedFromCursorReplay(
 
     const nextCursor = advanceCursor(cursor, mergedTrades);
     if (nextCursor && allDecisionsRecorded) {
-      const wrote = await writeCursorFenced(STOCK_STREAM_ID, ctx.stockFenceToken, symbol, { cursor: nextCursor, lastPrice: finalPrevious });
-      if (!wrote) log(`fenced out streamId=${STOCK_STREAM_ID} — cursor write for symbol=${symbol} skipped, a newer session holds this stream`);
+      const pending: PersistedCursor = { cursor: nextCursor, lastPrice: finalPrevious };
+      const result = await writeCursorSerialized(ctx, symbol, pending);
+      if (result === "written" || result === "unchanged") {
+        // p6c gate finding (MED): this direct persist used to leave
+        // pendingCursorBySymbol/cursorLastPersistedAtMsBySymbol untouched —
+        // if no ordinary live trade followed before session end, the
+        // step-end flush would re-write whatever STALE value those maps
+        // last held (from before this replay), regressing the cursor back
+        // under the same still-current fence token. Syncing both maps here
+        // is the efficiency half of the fix: the flush now has nothing
+        // stale to re-write for this symbol. writeCursorFenced's own
+        // same-token regression guard (gap-replay-cursor.ts), plus p6d's
+        // per-symbol serialization (writeCursorSerialized), are the
+        // structural half — they hold even if this line were ever missed
+        // again. "unchanged" syncs too — same value, harmless either way.
+        ctx.pendingCursorBySymbol.set(symbol, pending);
+        ctx.cursorLastPersistedAtMsBySymbol.set(symbol, Date.now());
+      } else if (result === "fenced-out") {
+        log(`fenced out streamId=${STOCK_STREAM_ID} — cursor write for symbol=${symbol} skipped, a newer session holds this stream`);
+      } else {
+        log(`cursor write for symbol=${symbol} rejected as a regression — a newer value is already persisted, unexpected on the replay path`);
+      }
       cursor = nextCursor;
       seedPrice = finalPrevious;
     } else if (nextCursor) {
@@ -321,6 +382,13 @@ async function seedSymbolFromScratch(ctx: SessionContext, symbol: string, watche
 }
 
 function handleLiveTrade(trade: StreamTrade, ctx: SessionContext): void {
+  // p6d gate fix: the explicit local input gate — checked FIRST, before any
+  // other work. stockStream.disconnect() (runFencedAlpacaSession's finally)
+  // is NOT a barrier against this callback firing again (Codex proved it
+  // against the installed SDK), so this flag is what actually stops the
+  // session from processing any further trade once shutdown begins.
+  if (ctx.shuttingDown) return;
+
   ctx.lastKnownPriceBySymbol.set(trade.symbol, trade.price);
 
   if (ctx.seedingSymbols.has(trade.symbol)) {
@@ -337,14 +405,35 @@ function handleLiveTrade(trade: StreamTrade, ctx: SessionContext): void {
   // symbol just advanced to the SAME trade.price below), fenced and
   // fire-and-forget via pendingWrites like any other async work launched
   // from a stream callback.
-  ctx.pendingWrites.push(
-    writeCursorFenced(STOCK_STREAM_ID, ctx.stockFenceToken, trade.symbol, {
-      cursor: cursorFromTrade(toReplayTrade(trade)),
-      lastPrice: trade.price,
-    }).then((wrote) => {
-      if (!wrote) log(`fenced out streamId=${STOCK_STREAM_ID} — live cursor write for symbol=${trade.symbol} skipped, a newer session holds this stream`);
-    }),
-  );
+  //
+  // Task #33: pendingCursorBySymbol is updated on EVERY trade, synchronously,
+  // regardless of the throttle below — it's the "most advanced known state"
+  // flushPendingCursors reads at step-end. Only the actual Redis WRITE is
+  // throttled (shouldPersistCursorNow, gap-replay.ts), to at most once per
+  // CURSOR_WRITE_THROTTLE_MS per symbol. Safe to skip a write here: a
+  // reconnect resuming from a stale cursor just replays up to that many ms
+  // of trades this live handler ALREADY correctly processed — the exact
+  // "redundant delivery attempt for an already-fired subscription" shape
+  // this codebase's delivery layer is built to tolerate everywhere, not a
+  // new risk this throttle introduces (deliver-wake.ts's guardedDeliver own
+  // doc comment: "the wake pipeline is safe regardless [of staleness]
+  // because of the [tryTransitionToDelivering] CAS").
+  const pending: PersistedCursor = { cursor: cursorFromTrade(toReplayTrade(trade)), lastPrice: trade.price };
+  ctx.pendingCursorBySymbol.set(trade.symbol, pending);
+
+  const lastPersistedAtMs = ctx.cursorLastPersistedAtMsBySymbol.get(trade.symbol);
+  if (shouldPersistCursorNow(lastPersistedAtMs, Date.now(), CURSOR_WRITE_THROTTLE_MS)) {
+    ctx.cursorLastPersistedAtMsBySymbol.set(trade.symbol, Date.now());
+    ctx.pendingWrites.push(
+      writeCursorSerialized(ctx, trade.symbol, pending).then((result) => {
+        if (result === "fenced-out") {
+          log(`fenced out streamId=${STOCK_STREAM_ID} — live cursor write for symbol=${trade.symbol} skipped, a newer session holds this stream`);
+        } else if (result === "regressed") {
+          log(`live cursor write for symbol=${trade.symbol} rejected as a regression — unexpected on the live-trade path`);
+        }
+      }),
+    );
+  }
 
   for (const watch of ctx.watchesBySubId.values()) {
     if (watch.symbol !== trade.symbol) continue;
@@ -406,8 +495,27 @@ function connectStockStream(ctx: SessionContext): StockDataStream {
   });
   stream.onReconnecting((attempt) => log(`stock stream reconnecting attempt=${attempt}`));
   stream.onReconnected(() => {
+    // p6d gate fix, defense in depth: a reconnect event firing during or
+    // after shutdown has begun (the SDK's own reconnect/close internals are
+    // already proven surprising — see handleLiveTrade's own comment) must
+    // not start a fresh replay task after ctx.shuttingDown is set; that
+    // task would still be running (or about to start) after the shutdown
+    // sequence's own drain has already returned, exactly the ordering p6d
+    // closed for ordinary live trades.
+    if (ctx.shuttingDown) return;
     log("stock stream reconnected");
-    ctx.pendingWrites.push(replayAfterStockReconnect(ctx));
+    // p6d gate fix, round 2: queued through ctx.replayQueue (the SAME fixed
+    // key every time — REPLAY_QUEUE_KEY) rather than called directly. A
+    // flapping connection firing this handler more than once before the
+    // first replay finishes used to start overlapping replayAfterStockReconnect
+    // tasks, which race ctx.seedingSymbols' add/delete pairs and the shared
+    // PriceWatch.previous across ctx.watchesBySubId — see that function's
+    // own comment for why running them strictly one-at-a-time (not just
+    // deduping or dropping the second trigger) is both correct and
+    // sufficient. Pushed into pendingWrites as the QUEUED promise, so the
+    // session's shutdown drain waits for a still-queued (not yet started)
+    // replay too, not just an already-running one.
+    ctx.pendingWrites.push(ctx.replayQueue.run(REPLAY_QUEUE_KEY, () => replayAfterStockReconnect(ctx)));
   });
   stream.onError((err) => log(`stock stream error ${err}`));
   stream.onTrade((trade) => handleLiveTrade(trade, ctx));
@@ -431,8 +539,36 @@ function connectStockStream(ctx: SessionContext): StockDataStream {
  * comment on why). Queued via ctx.pendingWrites, like any other async work
  * launched from a stream callback, so the session step awaits it before
  * disconnecting.
+ *
+ * p6d gate fix, round 2: the CALLER (connectStockStream's onReconnected)
+ * now serializes every invocation of this whole function through
+ * ctx.replayQueue — only one call ever actually runs at a time, in
+ * trigger order, regardless of a flapping connection firing the reconnect
+ * event repeatedly. This makes two things correct that weren't guaranteed
+ * before: (1) `ctx.seedingSymbols.add()`/`.delete()` pairs from ONE call
+ * fully complete (every symbol processed, every delete run) before the
+ * NEXT queued call's OWN add() calls even happen — no interleaving where
+ * one call's delete exposes a symbol to live trades while a DIFFERENT
+ * call's replay for that same symbol is still in flight; (2) a second,
+ * later call's own `seedSymbolFromScratch` reads the cursor FRESH via
+ * readCursor at its own start — since it only runs after the FIRST call's
+ * writes (now correctly serialized per symbol too, see
+ * writeCursorSerialized) have already landed, it naturally resumes from
+ * wherever the first call left off and only replays the RESIDUAL gap, not
+ * the whole thing again. Sequential replay is therefore not just safe but
+ * strictly cheaper than concurrent replay would have been.
+ *
+ * The shutdown check below composes with ctx.shuttingDown the same way
+ * onReconnected's own pre-queue check does: a call that was ALREADY queued
+ * (waiting its turn behind another) when shutdown began still gets its
+ * turn — the session's shutdown drain (runFencedAlpacaSession's finally)
+ * awaits the queued promise regardless — but resolves as a fast no-op
+ * instead of running a real replay, since there's no point re-seeding
+ * watches the session is about to tear down anyway.
  */
 async function replayAfterStockReconnect(ctx: SessionContext): Promise<void> {
+  if (ctx.shuttingDown) return;
+
   const bySymbol = groupBySymbol([...ctx.watchesBySubId.values()]);
   for (const symbol of bySymbol.keys()) ctx.seedingSymbols.add(symbol);
 
@@ -641,6 +777,65 @@ async function recheckOrderMembership(ctx: SessionContext): Promise<void> {
 // --- the bounded session --------------------------------------------------
 
 /**
+ * Task #33: forces one final cursor+price write per symbol that ticked
+ * live this session, bypassing the throttle window entirely — called at
+ * step-end (runFencedAlpacaSession's `finally`) so a CLEAN step boundary
+ * never leaves more than a throttle window's worth of staleness behind;
+ * only an unclean termination (a hard kill that skips the `finally` block)
+ * loses up to CURSOR_WRITE_THROTTLE_MS, same as before this task existed
+ * for the ordinary reconnect-mid-window case.
+ *
+ * p6c gate finding (LOW), then p6d gate finding (proved p6c's fix
+ * incomplete): this used to be called right after stockStream.disconnect(),
+ * on the reasoning that disconnecting first makes "no further trades" a
+ * precondition of the snapshot. Codex proved that reasoning wrong against
+ * the INSTALLED SDK: disconnect() clears its own connection field and
+ * starts an async WebSocket close, but does not remove the socket's
+ * message listener or await the close handshake — an already-queued frame
+ * can still synchronously reach handleLiveTrade after disconnect()
+ * returns. There is no real quiescence barrier from the stream side alone.
+ *
+ * The actual fix (runFencedAlpacaSession's finally, in order): (1)
+ * ctx.shuttingDown is set FIRST — handleLiveTrade's own first line now
+ * returns immediately once it's true, which IS a real barrier (in-process
+ * state, not a network primitive); (2) disconnect() runs anyway, as
+ * best-effort teardown alongside the flag, not instead of it; (3)
+ * drainPendingWrites runs BEFORE this function is even called — that
+ * drain is what actually waits for any in-flight replay task (e.g.
+ * replayAfterStockReconnect, queued in ctx.pendingWrites) and any
+ * already-launched live-trade write to fully settle, so by the time THIS
+ * function reads ctx.pendingCursorBySymbol, nothing else can still be
+ * writing to it. Combined with per-symbol write serialization
+ * (writeCursorSerialized, serial-queue.ts) — the actual guarantee that two
+ * writes for the same symbol can never race each other at the Redis layer,
+ * regardless of call order — the snapshot this function takes is
+ * genuinely final. The caller drains a SECOND time after calling this, to
+ * actually wait for ITS OWN enqueued writes before the step returns.
+ *
+ * Reads ctx.pendingCursorBySymbol (always up to date, independent of
+ * whether the per-trade write itself was throttled away, AND independent
+ * of the gap-replay path's own direct writes — see seedFromCursorReplay's
+ * own p6c fix, which now keeps this map in sync too) — a symbol with zero
+ * live ticks this session has no entry and is correctly skipped, not
+ * written with stale/absent data. writeCursorFenced's own same-token
+ * regression guard is a second, redundant line of defense if this
+ * sequencing is ever violated anyway.
+ */
+function flushPendingCursors(ctx: SessionContext): void {
+  for (const [symbol, pending] of ctx.pendingCursorBySymbol) {
+    ctx.pendingWrites.push(
+      writeCursorSerialized(ctx, symbol, pending).then((result) => {
+        if (result === "fenced-out") {
+          log(`fenced out streamId=${STOCK_STREAM_ID} — final cursor flush for symbol=${symbol} skipped, a newer session holds this stream`);
+        } else if (result === "regressed") {
+          log(`final cursor flush for symbol=${symbol} rejected as a regression — a newer value is already persisted`);
+        }
+      }),
+    );
+  }
+}
+
+/**
  * Drains ctx.pendingWrites to a genuine fixed point: repeatedly takes
  * everything currently queued and awaits it, looping again if anything new
  * was appended while that batch was in flight. p2v Codex gate finding 8: a
@@ -688,6 +883,11 @@ export async function runFencedAlpacaSession(durationMs: number): Promise<void> 
     orderSubsById: new Map(),
     orderReconciliationOffset: 0,
     pendingWrites: [],
+    pendingCursorBySymbol: new Map(),
+    cursorLastPersistedAtMsBySymbol: new Map(),
+    cursorWriteQueue: createSerialQueue(),
+    replayQueue: createSerialQueue(),
+    shuttingDown: false,
   };
 
   let stockStream: StockDataStream | undefined;
@@ -739,18 +939,48 @@ export async function runFencedAlpacaSession(durationMs: number): Promise<void> 
       await recheckOrderMembership(ctx);
     }
   } finally {
-    // Drain in-flight deliveries/cursor writes launched from stream event
-    // callbacks before disconnecting — otherwise a delivery still in
-    // flight when the step returns can be frozen/killed mid-write or
-    // fenced out by the next step before it ever completes. A fixed-point
-    // drain (drainPendingWrites), not a single snapshot — see its own
-    // comment (p2v finding 8).
-    await drainPendingWrites(ctx);
+    // p6d gate fix (supersedes p6c's disconnect-first ordering, which Codex
+    // proved incomplete against the installed SDK — disconnect() is not a
+    // quiescence barrier: an already-queued frame can still synchronously
+    // reach handleLiveTrade after it returns). Five ordered steps:
+    //
+    // (1) The explicit local input gate, set FIRST — handleLiveTrade's own
+    // first line now returns immediately once this is true. This is the
+    // actual barrier; everything below is best-effort cleanup alongside it,
+    // not a substitute for it.
+    ctx.shuttingDown = true;
+    // (2) Disconnect the stock stream anyway — real network teardown, run
+    // in parallel with (1) rather than relied on alone.
     try {
       stockStream?.disconnect();
     } catch (err) {
       log(`stock stream disconnect error ${err instanceof Error ? err.message : String(err)}`);
     }
+    // (3) FIRST drain: waits for every write already in flight BEFORE
+    // shutdown — ordinary live-trade cursor writes/deliveries, AND any
+    // in-flight replay task (replayAfterStockReconnect, itself queued in
+    // pendingWrites) — to fully complete, including that replay's own
+    // p6c-fixed sync of ctx.pendingCursorBySymbol. Only once this settles
+    // is ctx.pendingCursorBySymbol guaranteed to reflect every symbol's
+    // TRUE final state — flushPendingCursors' snapshot below would
+    // otherwise race an in-flight replay's own write for the same symbol
+    // (the p6d gate finding: the exact regression this whole fix chain
+    // exists to close). A fixed-point drain (drainPendingWrites), not a
+    // single snapshot — see its own comment (p2v finding 8).
+    await drainPendingWrites(ctx);
+    // (4) NOW the final cursor snapshot+flush — every writer that could
+    // still be running has settled (3), and every write (including this
+    // one) is serialized per symbol (writeCursorSerialized, serial-queue.ts)
+    // regardless of call order, so this is provably the sole writer for
+    // every symbol it touches. flushPendingCursors only enqueues onto
+    // ctx.pendingWrites — the actual writes still need step (5) to land.
+    flushPendingCursors(ctx);
+    // (5) SECOND drain: waits for flushPendingCursors' own writes to land
+    // before the step returns. Skipping this would leave the step's most
+    // important write (the final, definitive cursor state) unawaited —
+    // exactly what drainPendingWrites exists to prevent for every other
+    // write in this file.
+    await drainPendingWrites(ctx);
     try {
       tradingStream?.disconnect();
     } catch (err) {

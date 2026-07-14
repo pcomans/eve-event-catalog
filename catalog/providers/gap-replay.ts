@@ -145,6 +145,56 @@ export function cursorFromTrade(trade: ReplayTrade): ReplayCursor {
 }
 
 /**
+ * Task #33 (Redis command-burn reduction): pure throttle decision for the
+ * connector's per-symbol cursor writes (connector/lib/alpaca-session.ts's
+ * handleLiveTrade) — a persisted cursor is only ever READ on reconnect/
+ * session-start (seedFromCursorReplay), so writing it on every single live
+ * trade tick is unnecessary; at most once per `throttleMs` per symbol is
+ * enough. `undefined` for `lastPersistedAtMs` means "never persisted this
+ * session" — always due. `>=`, not `>`: a candidate arriving EXACTLY at the
+ * throttle boundary counts as due (matches gap-replay-cursor.ts and the
+ * read-cache's own boundary convention elsewhere in this codebase).
+ */
+export function shouldPersistCursorNow(lastPersistedAtMs: number | undefined, nowMs: number, throttleMs: number): boolean {
+  return lastPersistedAtMs === undefined || nowMs - lastPersistedAtMs >= throttleMs;
+}
+
+/**
+ * Whether `candidate` is strictly chronologically newer than `current` —
+ * the same total order mergeGapTrades/advanceCursor use, pulled out as its
+ * own question so a caller holding two bare ReplayCursor values (not a
+ * trade sequence to fold through advanceCursor) can still ask it. `current
+ * === null` means nothing persisted yet — any real candidate counts as
+ * newer. One comparator for the whole codebase: advanceCursor (below) is
+ * defined in terms of this, and gap-replay-cursor.ts's writeCursorFenced
+ * (task #33's p6c fix — a same-token write must not regress the persisted
+ * cursor, not just a different session's stale write) is the other caller.
+ */
+export function isCursorNewerThan(candidate: ReplayCursor, current: ReplayCursor | null): boolean {
+  if (!current) return true;
+  const candidateAsTrade: ReplayTrade = { id: candidate.tradeId, exchange: candidate.exchange, timestamp: candidate.timestamp, price: 0 };
+  const currentAsTrade: ReplayTrade = { id: current.tradeId, exchange: current.exchange, timestamp: current.timestamp, price: 0 };
+  return compareReplayTrades(candidateAsTrade, currentAsTrade) > 0;
+}
+
+/**
+ * Whether two cursors mark the EXACT same position — same total order
+ * isCursorNewerThan uses. p6d gate fix (task #33): a replay's persist and
+ * the session's final flush landing the identical cursor+price back to
+ * back (the ordinary, expected shape once the replay path keeps
+ * pendingCursorBySymbol in sync — see alpaca-session.ts's
+ * seedFromCursorReplay) is not a regression and must not log as one;
+ * gap-replay-cursor.ts's writeCursorFenced uses this to report a distinct,
+ * quiet "unchanged" result instead of the loud "regressed" one, which stays
+ * reserved for a genuinely OLDER candidate.
+ */
+export function isCursorEqual(a: ReplayCursor, b: ReplayCursor): boolean {
+  const aAsTrade: ReplayTrade = { id: a.tradeId, exchange: a.exchange, timestamp: a.timestamp, price: 0 };
+  const bAsTrade: ReplayTrade = { id: b.tradeId, exchange: b.exchange, timestamp: b.timestamp, price: 0 };
+  return compareReplayTrades(aAsTrade, bAsTrade) === 0;
+}
+
+/**
  * Advances the cursor to the last (chronologically latest, given an
  * already-sorted `trades` — mergeGapTrades' own output) trade in the
  * sequence; leaves it unchanged if the sequence is empty (nothing to
@@ -157,12 +207,8 @@ export function cursorFromTrade(trade: ReplayTrade): ReplayCursor {
  */
 export function advanceCursor(current: ReplayCursor | null, trades: ReplayTrade[]): ReplayCursor | null {
   if (trades.length === 0) return current;
-  const candidate = trades[trades.length - 1];
-  if (!current) return cursorFromTrade(candidate);
-
-  const currentAsTrade: ReplayTrade = { id: current.tradeId, exchange: current.exchange, timestamp: current.timestamp, price: 0 };
-  if (compareReplayTrades(candidate, currentAsTrade) <= 0) return current;
-  return cursorFromTrade(candidate);
+  const candidate = cursorFromTrade(trades[trades.length - 1]);
+  return isCursorNewerThan(candidate, current) ? candidate : current;
 }
 
 /** The seam a real Alpaca REST call plugs into (getStockTrades, scoped to the gap since `cursor`) — tests inject a stub returning plain arrays instead. */

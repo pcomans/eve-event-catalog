@@ -20,6 +20,7 @@ import {
 import { assertCatalogHonesty } from "#catalog/catalog.ts";
 import { assertCatalogApiSecretConfigured, isAuthorizedHeader } from "#catalog/auth.ts";
 import { listEvents } from "#catalog/history.ts";
+import { createCachedReader } from "#catalog/read-cache.ts";
 import { incrementAndCheckTurnCap } from "#catalog/turn-cap.ts";
 // Side-effecting imports: register the alpaca and edgar providers
 // (registerProvider(...)) at module load. ES module imports fully evaluate
@@ -56,6 +57,20 @@ function withConversationBaggage<T>(conversationId: string, fn: () => Promise<T>
 // routes below unauthenticated (see AGENTS.md rule 4's assertCatalogHonesty
 // for the same pattern applied to the catalog).
 assertCatalogApiSecretConfigured();
+
+// Task #33 (Redis command-burn reduction): GET /catalog/subscriptions and
+// GET /catalog/events are polled every ~2s by every open observatory tab
+// and catalog/observe-page.ts — without this, N concurrent viewers cost N
+// Redis reads per poll tick. 2000ms matches (not exceeds) that client poll
+// interval, so the cache never adds staleness beyond what a dashboard
+// already tolerates; the client's own polling cadence is unchanged
+// (createCachedReader, catalog/read-cache.ts). Module-level, so this is
+// only as effective as this module's own instance count (KNOWN_ISSUES.md
+// #14's multi-instance caveat) — a correctness non-issue (a cache miss just
+// re-reads the same shared Redis), only an efficiency one.
+const READ_CACHE_TTL_MS = 2000;
+const readSubscriptionsCached = createCachedReader(listSubscriptions, READ_CACHE_TTL_MS);
+const readEventsCached = createCachedReader(listEvents, READ_CACHE_TTL_MS);
 
 /**
  * Shared-secret gate for the two write routes (POST /catalog/chat, POST
@@ -311,7 +326,7 @@ export default defineChannel({
     }),
 
     GET("/catalog/subscriptions", async () => {
-      const subscriptions = await listSubscriptions();
+      const subscriptions = await readSubscriptionsCached();
       return Response.json(subscriptions);
     }),
 
@@ -320,7 +335,7 @@ export default defineChannel({
     // No auth — same openness as GET /catalog/subscriptions — and nothing
     // in a history entry is a secret (catalog/history.ts).
     GET("/catalog/events", async () => {
-      const events = await listEvents();
+      const events = await readEventsCached();
       return Response.json(events);
     }),
 

@@ -5,11 +5,14 @@ import {
   advanceCursor,
   cursorFromTrade,
   filterTradesAfterCursor,
+  isCursorEqual,
+  isCursorNewerThan,
   mergeGapTrades,
   padTimestampToNanoseconds,
   partitionByCursorReadiness,
   performGapReplay,
   replayThroughCrossingPredicate,
+  shouldPersistCursorNow,
   type ReplayCursor,
   type ReplayTrade,
 } from "./gap-replay.ts";
@@ -150,6 +153,51 @@ test("advanceCursor: a genuinely later candidate still advances normally", () =>
   assert.deepEqual(advanceCursor(current, later), cursorFromTrade(later[0]));
 });
 
+// p6c gate finding (task #33's cursor-write throttle): the connector's
+// fenced cursor write (gap-replay-cursor.ts's writeCursorFenced) needs the
+// SAME "is this actually newer?" question advanceCursor already answers,
+// but for two bare ReplayCursor values rather than a trade sequence to fold
+// through — a same-token write (still fenced-in, still the current session)
+// that would regress the persisted cursor must be rejected too, not just a
+// different session's stale write. One comparator, two callers.
+test("isCursorNewerThan: null current means anything real counts as newer (first-ever persist)", () => {
+  const candidate: ReplayCursor = { tradeId: 1, exchange: "V", timestamp: "2026-07-13T10:00:01Z" };
+  assert.equal(isCursorNewerThan(candidate, null), true);
+});
+
+test("isCursorNewerThan: a genuinely later candidate is newer", () => {
+  const current: ReplayCursor = { tradeId: 5, exchange: "V", timestamp: "2026-07-13T10:00:05Z" };
+  const candidate: ReplayCursor = { tradeId: 6, exchange: "V", timestamp: "2026-07-13T10:00:06Z" };
+  assert.equal(isCursorNewerThan(candidate, current), true);
+});
+
+test("isCursorNewerThan: an older candidate is NOT newer — the exact regression this guards against", () => {
+  const current: ReplayCursor = { tradeId: 5, exchange: "V", timestamp: "2026-07-13T10:00:05Z" };
+  const candidate: ReplayCursor = { tradeId: 3, exchange: "V", timestamp: "2026-07-13T10:00:03Z" };
+  assert.equal(isCursorNewerThan(candidate, current), false);
+});
+
+test("isCursorNewerThan: the exact same position is NOT newer", () => {
+  const current: ReplayCursor = { tradeId: 5, exchange: "V", timestamp: "2026-07-13T10:00:05Z" };
+  assert.equal(isCursorNewerThan({ ...current }, current), false);
+});
+
+// p6d gate fix (task #33): the equal-cursor case gets its own quiet
+// "unchanged" no-op (gap-replay-cursor.ts's writeCursorFenced) instead of
+// being lumped into "regressed" — this is the comparator that distinction
+// is built on.
+test("isCursorEqual: the exact same position is equal", () => {
+  const a: ReplayCursor = { tradeId: 5, exchange: "V", timestamp: "2026-07-13T10:00:05Z" };
+  assert.equal(isCursorEqual(a, { ...a }), true);
+});
+
+test("isCursorEqual: a genuinely different position (any of the three fields) is not equal", () => {
+  const a: ReplayCursor = { tradeId: 5, exchange: "V", timestamp: "2026-07-13T10:00:05Z" };
+  assert.equal(isCursorEqual(a, { ...a, tradeId: 6 }), false);
+  assert.equal(isCursorEqual(a, { ...a, exchange: "Q" }), false);
+  assert.equal(isCursorEqual(a, { ...a, timestamp: "2026-07-13T10:00:06Z" }), false);
+});
+
 // Codex gate finding: Alpaca's historical-trades REST `start` is INCLUSIVE
 // — a fetch scoped from the cursor's own timestamp can return the cursor's
 // own trade (or siblings sharing its exact timestamp) again. Replaying
@@ -263,4 +311,23 @@ test("partitionByCursorReadiness: a watch armed at-or-before the cursor is curso
 
   assert.deepEqual(result.readyForCursorReplay, [armedBefore, armedExactlyAtCursor], "at-or-before the cursor must be cursor-ready, including the exact boundary");
   assert.deepEqual(result.needFreshSeed, [armedAfter], "armed strictly after the cursor must never ride a replay that predates it");
+});
+
+// Task #33 (Redis command-burn reduction): shouldPersistCursorNow is the
+// pure throttle decision connector/lib/alpaca-session.ts's handleLiveTrade
+// gates its per-trade cursor write on.
+test("shouldPersistCursorNow: never persisted this session (undefined) is always due", () => {
+  assert.equal(shouldPersistCursorNow(undefined, 1_000_000, 5000), true);
+});
+
+test("shouldPersistCursorNow: strictly inside the throttle window is not due", () => {
+  assert.equal(shouldPersistCursorNow(1_000_000, 1_004_999, 5000), false);
+});
+
+test("shouldPersistCursorNow: exactly at the throttle boundary is due", () => {
+  assert.equal(shouldPersistCursorNow(1_000_000, 1_005_000, 5000), true);
+});
+
+test("shouldPersistCursorNow: past the throttle boundary is due", () => {
+  assert.equal(shouldPersistCursorNow(1_000_000, 1_009_999, 5000), true);
 });
