@@ -290,3 +290,37 @@ Found 2026-07-13 on real infra (preview deployment), running `connector/workflow
    **Sharper and more important finding riding along with #2**: while retrying against that serialization failure, the step actually called `start()` again on every retry — 4 retries produced 4 distinct downstream `wrun_...` run IDs before the step gave up as `FatalError: ... exceeded max retries`. `start()` has no idempotency-key option (checked `StartOptions`'s full shape: `world`, `specVersion`, `deploymentId` only). **This means any step wrapping a chaining `start()` call is not safely retryable as written** — if it ever fails for a transient reason after `start()` has already succeeded (not just this now-fixed serialization bug), the retry forks a second, redundant "forever" chain running in parallel with the first. Not fixed here (the smoke test's fix avoids retries by not failing at all); flagged for whoever hardens `market-data-session.ts`'s own `startNextRun` — worth an explicit "has this run already been chained" check (e.g. a Redis flag keyed by the parent runId) before calling `start()` again on retry, or confirming from Vercel whether a future SDK version adds an idempotency key.
 
 **Why this matters for Phase 3**: the *sleep/resume* mechanism itself is NOT what failed — the smoke test's first (pre-fix) run survived 6×30s sleeps plus one full 35-minute sleep (past vercel/workflow issue #634's reported ~30-minute trouble spot) without incident, and only failed afterward on the unrelated `start()` bug above. That's a positive signal for using durable `sleep()` for Phase 3's expiry timers rather than falling back to a sorted-set sweep — the sweep alternative would still be worth keeping in mind for whatever workaround #2's forking risk needs, though.
+
+## 16. Package-manager CLIs run from inside `observatory/` silently create a second lockfile
+
+`observatory/` carries its own `pnpm-workspace.yaml` (holding only `ignoredBuiltDependencies`,
+mirroring `connector/`'s shape). Any package-manager CLI run with its cwd *inside* that
+directory — hit 2026-07-14 with `npx ai-elements@1.9.0 add ...` — treats it as its own
+workspace root and writes a stray `observatory/pnpm-lock.yaml` instead of updating the root
+lockfile. The stray file is silently stale from birth and shadows the real resolution. Caught
+via `git add -n` before commit; fixed by deleting the stray and re-running `pnpm install` from
+the repo root. Rule: run installs and scaffold CLIs (`npx shadcn add`, `npx ai-elements add`,
+anything that touches dependencies) from the WORKSPACE ROOT, and check for stray lockfiles
+after any `npx` inside a subdirectory. Related cosmetic symptom: `next dev` warns "inferred
+workspace root ... multiple lockfiles"; a `turbopack.root` fix attempt broke the dev server
+outright (couldn't resolve `next/package.json`) and was reverted — leave the warning alone.
+
+## 17. eve 0.22.5 `defaultMessageReducer`: a whitespace-only message part is stuck at `state: "streaming"` forever
+
+The harness only emits `message.completed` when accumulated text is non-whitespace (every
+flush site in `harness/emission.js` gates on `d.trim().length>0`; end-of-stream emits a
+`message: null` completion only for the empty-delivery sentinel). The client reducer
+(`client/message-reducer.js`) has no trim logic and only `message.completed` transitions or
+removes a text part — `turn.completed` touches message *metadata* only. Net: a model step that
+streams only whitespace leaves a text part permanently `state: "streaming"` in the reducer's
+projection. Observed impact in the observatory decisions view is near-invisible (Streamdown
+renders whitespace as nothing), so this is ACCEPTED ship-as-is (decision 2026-07-14), not
+patched around. Third item for eve-team feedback, alongside #1's silent handler no-op and
+#3's broken streaming docs example.
+
+## 18. `ai-elements@1.9.0` vendored `code-block.tsx`/`shimmer.tsx` fail current react-hooks lint rules
+
+The ai-elements CLI vendors component source into `observatory/components/ai-elements/`; two
+files trip newer `eslint-plugin-react-hooks` rules (ref-during-render, component-created-
+during-render). Upstream registry code, deliberately not patched locally — lint is run scoped
+to files we author. Revisit on the next `ai-elements` upgrade.

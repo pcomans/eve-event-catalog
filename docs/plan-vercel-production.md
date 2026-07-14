@@ -265,7 +265,12 @@ Phase 1 Codex gate).
 [vercel/chatbot](https://github.com/vercel/chatbot) as the starting point ONLY if it reduces
 work** — it is chat-first (composer, auth, its own persistence) versus our read-only transcript
 replay, so the likely value is its message-rendering components and styling, not its skeleton.
-Decide with a short time-boxed spike at Phase 5 kickoff, not by default. Pages: (a) campaign
+Decide with a short time-boxed spike at Phase 5 kickoff, not by default. **DECIDED (spike,
+2026-07-14): fresh minimal Next.js app + `ai-elements` npm CLI components (message,
+reasoning, tool, code-block, conversation — Apache-2.0, prop-driven, no useChat/persistence
+coupling); NO fork of vercel/chatbot (chat-first skeleton, and the repo's own license is a
+custom non-MIT "NOASSERTION" — the published package is the clean dependency). Built as
+`observatory/`, Phase 5 complete on main 3aa43fd, gates p5a–p5k.** Pages: (a) campaign
 view: equity curve +
 positions + realized P&L over time (Alpaca account history; load the dataviz skill for charts),
 (b) subscriptions table (live lifecycle from Redis), (c) event feed (wakes/arms/fires/expiries
