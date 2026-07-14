@@ -102,6 +102,14 @@ Vercel project (Vercel Services — one project, three services, private binding
   └ service: Next.js observatory (read-only public site): equity/positions, subscriptions
         table, event feed, full transcripts. Private-binds to eve/Redis; public via top-level
         rewrite rule.
+  ROUTING DECIDED (lead, 2026-07-14, within this approved topology — Phase 6 kickoff found
+  the eve app was never declared as a service and connector's catch-all rewrite claimed all
+  traffic): explicit `eve` service entry; rewrites in order `/catalog/(.*)`→eve, explicit
+  connector route paths (no wildcards)→connector, `/(.*)`→observatory (public default).
+  Connector routes gain fail-closed bearer auth (Vercel CRON_SECRET convention) BEFORE any
+  exposure — closes connector/README's open auth item. Accepted limit: the observatory's
+  session-stream proxy is bounded by the 800s function ceiling; the client's existing 2s
+  reconnect+replay makes the cutoff a brief refresh (~every 13 min on a long-open page).
   delivery: deliverWake → Vercel Queues topic (@vercel/queue) → consumer → wake route
   event history: NEW append-only Redis stream (all wakes/arms/fires/expiries/failures) written
         by wake.ts — feeds the observatory
@@ -144,10 +152,14 @@ and #3's Nitro caveat. New gate 7 (unbounded-workflow API) is the only fresh res
    detected; custom channel routes → Nitro → Functions. Route-auth secrets must be **real Vercel
    env vars** (not baked into `.env.local`). Model creds: AI Gateway via OIDC (automatic on
    Vercel) or explicit keys. **Self-invoking wake loopback works UNLESS Deployment Protection is
-   on → then attach `VERCEL_AUTOMATION_BYPASS_SECRET` to the wake POST. DECIDED (Philipp,
-   2026-07-13): Deployment Protection OFF — open from day one, including half-built previews;
-   the write routes' bearer auth is the security boundary, and no bypass-secret plumbing is
-   needed anywhere. LangSmith also DECIDED same date: skip the paid upgrade for now (quota-dead
+   on → then attach `VERCEL_AUTOMATION_BYPASS_SECRET` to the wake POST. REVISED (Philipp,
+   2026-07-14, supersedes the 2026-07-13 "OFF everywhere" decision): **previews KEEP Standard
+   Protection (SSO-walled); only the PRODUCTION observatory is public.** Consequences: cloud
+   E2E and scripts against previews use the sanctioned `vercel curl ... --deployment <url>`
+   bypass (KNOWN_ISSUES #13), and the eve app's self-invoking wake loopback on PREVIEW
+   deployments needs `VERCEL_AUTOMATION_BYPASS_SECRET` attached to the wake POST (production
+   needs nothing — production URLs are not walled by default). The write routes' bearer auth
+   remains the security boundary on production. LangSmith also DECIDED same date: skip the paid upgrade for now (quota-dead
    until Aug 1, see KNOWN_ISSUES #6); event feed + session streams + observatory carry
    observability; revisit at Phase 6 only if campaign debugging demands it.** Agent Runs tab exists
    but is gated (team enablement) — not a programmatic API, don't depend on it.

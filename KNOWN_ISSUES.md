@@ -324,3 +324,20 @@ The ai-elements CLI vendors component source into `observatory/components/ai-ele
 files trip newer `eslint-plugin-react-hooks` rules (ref-during-render, component-created-
 during-render). Upstream registry code, deliberately not patched locally — lint is run scoped
 to files we author. Revisit on the next `ai-elements` upgrade.
+
+## 19. Upstash free tier hard-caps at 500k commands/month — and market hours burn it fast
+
+Hit 2026-07-14, ~2 hours into the campaign's first live market session: every Redis command
+started failing with `UpstashError: ERR max requests limit exceeded. Limit: 500000, Usage:
+500000` — the catalog's entire state layer (registry, delivery transitions, event history,
+turn cap, cursors) degrades at once, while anything not Redis-backed (in-process timers,
+parked eve sessions, Alpaca REST) keeps working, so the failure is PARTIAL and confusing:
+the observe page's transcript still streams while its event feed dies. Same
+silent-quota-death family as #6's LangSmith incident. Burn profile: the standing
+EDGAR/expiry/recovery sweeps consume steadily 24/7, but the big spike is market hours — the
+in-process price watcher persists the gap-replay cursor on EVERY live trade tick (p2v fix
+10). Resolution: upgraded to pay-as-you-go (Philipp, 2026-07-14) — service resumes on the
+next command, no restart needed. Follow-up tracked (task #33): throttle per-tick cursor
+writes and audit sweep command counts, since on paid this is now a cost knob, not a quota
+cliff. Quick check when Redis-backed features die weirdly: `grep 'max requests limit'` in
+the dev server log.
