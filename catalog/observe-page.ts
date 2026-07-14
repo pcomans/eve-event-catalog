@@ -250,6 +250,9 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
       if (!data.message) return null;
       div.className = "block assistant";
       bubble.textContent = data.message;
+    } else if (type === "message.appended") {
+      div.className = "block assistant";
+      bubble.textContent = data.messageSoFar || "";
     } else if (type === "reasoning.appended") {
       div.className = "block reasoning";
       bubble.textContent = data.reasoningSoFar || "";
@@ -319,8 +322,29 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
     activeAbortController = controller;
     var buf = "";
     var currentReasoningBlock = null;
+    var currentMessageBlock = null;
     var container = document.getElementById("transcript");
     container.innerHTML = "";
+
+    // Closes currentMessageBlock, discarding its bubble entirely if its
+    // content is empty/whitespace-only instead of leaving a phantom blank
+    // assistant div. Two eve harness behaviors (node_modules/eve/dist/src/harness/emission.js)
+    // make that case reachable: (1) message.completed can carry
+    // message: null — eve's finish-of-stream branch
+    // (hasEmptyDeliverySentinel(d) ? ...message:null... : d.trim().length>0 && ...)
+    // emits a null-message completion after a conditional no-delivery
+    // response; (2) message.completed is skipped entirely for a
+    // whitespace-only accumulated message — every flush site gates on
+    // d.trim().length>0 before flushing (e.g. emitActionRequest:
+    // d.trim().length>0&&await flushCurrentMessage()), so a whitespace-only
+    // block never gets a completed event to finalize it.
+    function closeMessageBlock() {
+      if (!currentMessageBlock) return;
+      if (!currentMessageBlock.bubble.textContent.trim()) {
+        container.removeChild(currentMessageBlock.div);
+      }
+      currentMessageBlock = null;
+    }
 
     function appendEvent(evt) {
       var data = evt.data || {};
@@ -338,19 +362,52 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
         return;
       }
 
+      // Same coalescing as reasoning above: message.appended's messageSoFar
+      // is cumulative, so dozens/hundreds of deltas update one bubble in
+      // place instead of each rendering as its own empty system block.
+      if (currentMessageBlock && (evt.type === "message.appended" || evt.type === "message.completed")) {
+        currentMessageBlock.bubble.textContent = evt.type === "message.appended" ? (data.messageSoFar || "") : (data.message || "");
+        currentMessageBlock.meta.textContent = metaText;
+        if (evt.type === "message.completed") closeMessageBlock();
+        if (atBottom) container.scrollTop = container.scrollHeight;
+        return;
+      }
+
+      // A tool call/result closes the MESSAGE tracker only (never the
+      // reasoning one — see the boundary comment below). eve only flushes
+      // message.completed before a tool event for non-whitespace
+      // accumulated text (harness's d.trim().length>0&&await
+      // flushCurrentMessage() gate at every emitActionRequest/tool-result
+      // site) — for whitespace-only text it does neither, so without this
+      // the block stays open across the tool call and the step's next real
+      // text reuses it in place, rendering out of order *before* the tool
+      // block it actually followed. Closing here means that next text opens
+      // its own fresh block via the message.appended branch below instead.
+      if (evt.type === "actions.requested" || evt.type === "action.result") {
+        closeMessageBlock();
+      }
+
       var block = blockFor(evt.type, data, evt.meta && evt.meta.at);
       if (evt.type === "reasoning.appended") {
         currentReasoningBlock = block;
+      } else if (evt.type === "message.appended") {
+        currentMessageBlock = block;
       } else if (isStepOrTurnBoundary(evt.type)) {
         // eve emits reasoning.completed to close out each reasoning block —
         // a tool call (actions.requested/action.result) can legitimately
-        // interleave BETWEEN a block's appended chunks and its completed
-        // event within the same step, so only step/turn/session boundaries
-        // reset the tracker. Clearing on every non-reasoning event (the
-        // original bug) meant reasoning.completed could never find the
-        // block a preceding tool call had orphaned, so it created a second,
-        // out-of-order bubble instead of finalizing the first one in place.
+        // interleave BETWEEN a reasoning block's appended chunks and its
+        // completed event within the same step, so only step/turn/session
+        // boundaries reset the reasoning tracker. Clearing it on every
+        // non-matching event (the original bug) meant reasoning.completed
+        // could never find the block a preceding tool call had orphaned, so
+        // it created a second, out-of-order bubble instead of finalizing
+        // the first one in place. The message tracker doesn't need that
+        // same tolerance (tool events already close it above), but still
+        // gets swept here for the one case tool events don't cover: a
+        // whitespace-only trailing message with no tool call after it at
+        // all, which eve also never sends a message.completed for.
         currentReasoningBlock = null;
+        closeMessageBlock();
       }
       if (!block) return;
       container.appendChild(block.div);
