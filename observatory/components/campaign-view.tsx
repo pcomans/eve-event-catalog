@@ -19,7 +19,17 @@ function currency(value: number): string {
   return value.toLocaleString("en-US", { style: "currency", currency: "USD" });
 }
 
+// Alpaca's own numbers occasionally leave a signed epsilon around an exact-
+// zero P&L (float rounding, e.g. -0.0049999...) that would otherwise render
+// as "-$0.00" — half a cent isn't a real gain or loss, so both P&L tiles
+// treat it as exactly zero via this one shared check.
+const PNL_EPSILON = 0.005;
+function isZeroPnl(value: number): boolean {
+  return Math.abs(value) < PNL_EPSILON;
+}
+
 function signedCurrency(value: number): string {
+  if (isZeroPnl(value)) return currency(0);
   const formatted = currency(Math.abs(value));
   return value >= 0 ? `+${formatted}` : `-${formatted}`;
 }
@@ -108,7 +118,7 @@ export function CampaignView({ initialEquity }: { initialEquity: number }) {
           label="Unrealized P&L"
           value={positionsLoading ? "…" : fmtOrDash(unrealizedPnl, signedCurrency)}
           delta={
-            !positionsLoading && unrealizedPnl !== null
+            !positionsLoading && unrealizedPnl !== null && !isZeroPnl(unrealizedPnl)
               ? { text: unrealizedPnl >= 0 ? "up" : "down", good: unrealizedPnl >= 0 }
               : undefined
           }
@@ -117,7 +127,7 @@ export function CampaignView({ initialEquity }: { initialEquity: number }) {
           label="Realized P&L"
           value={pnlLoading ? "…" : fmtOrDash(realizedPnl, signedCurrency)}
           delta={
-            !pnlLoading && realizedPnl !== null
+            !pnlLoading && realizedPnl !== null && !isZeroPnl(realizedPnl)
               ? { text: realizedPnl >= 0 ? "up" : "down", good: realizedPnl >= 0 }
               : undefined
           }

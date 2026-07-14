@@ -12,6 +12,7 @@
 // several of these are absent from the README's own top-level import examples).
 import { streaming, Alpaca, marketDataShapes, trading } from "@alpacahq/alpaca-trade-api";
 
+import { readCursor } from "./gap-replay-cursor.ts";
 import type { OrderStatusSnapshot } from "./order-reconciliation.ts";
 import { padTimestampToNanoseconds, type ReplayCursor, type ReplayTrade } from "./gap-replay.ts";
 
@@ -185,15 +186,36 @@ export function recordTestFeedTrade(symbol: string, trade: LatestTrade): void {
   testFeedTrades.set(symbol, trade);
 }
 
+// Same WATCHER_HOST convention as alpaca.ts (duplicated per-module, like
+// FEED above — KNOWN_ISSUES.md #2's "read once at module load, changing it
+// needs a restart anyway"). Only the "connector" branch matters here
+// (getLatestTrade's fallback below); the fail-closed throw on a SET-but-
+// invalid value already lives in alpaca.ts, whose own module-load throw
+// stops the eve app from booting on a typo — duplicating that throw here
+// too would reintroduce exactly the "importing this file alone crashes an
+// unrelated bundle" problem the lazy alpacaClient Proxy above exists to
+// avoid, for a check this seam doesn't otherwise need.
+const IS_CONNECTOR_MODE = process.env.WATCHER_HOST === "connector";
+
 export async function getLatestTrade(symbol: string, feed: DataFeed): Promise<LatestTrade> {
   if (feed === "test") {
     const trade = testFeedTrades.get(symbol);
-    if (!trade) {
-      throw new Error(
-        `no test-feed trade observed yet for ${symbol} — the price stream hasn't ticked since this process started`,
-      );
+    if (trade) return trade;
+
+    // In connector mode, alpaca.ts's arm()/disarm() are pure no-ops (p2v fix
+    // 1) — the in-process tick handler that calls recordTestFeedTrade above
+    // never runs, so this Map is ALWAYS empty here. The connector's own
+    // session persists each symbol's latest price alongside its replay
+    // cursor instead (gap-replay-cursor.ts's readCursor, written by p2v fix
+    // 10's writeCursorFenced) — fall back to that before giving up.
+    if (IS_CONNECTOR_MODE) {
+      const persisted = await readCursor(symbol);
+      if (persisted) return { price: persisted.lastPrice, timestamp: persisted.cursor.timestamp };
     }
-    return trade;
+
+    throw new Error(
+      `no test-feed trade observed yet for ${symbol} — the price stream hasn't ticked since this process started`,
+    );
   }
 
   const resp = await alpacaClient.marketData.stocks.stockLatestTradeSingle({ symbol, feed });

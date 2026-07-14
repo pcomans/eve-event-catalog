@@ -18,7 +18,23 @@ import type { Subscription } from "../types.ts";
 // evaluation correctly. Node gives each test FILE its own process by
 // default (verified separately), so this can never leak into alpaca.test.ts's
 // own (default, in-process) assumptions, or vice versa.
+//
+// Also deletes the Alpaca credentials before every load: alpaca-client.ts's
+// lazy alpacaClient Proxy defers `new Alpaca(...)` to the first real
+// property access, and that constructor throws IMMEDIATELY if it has no
+// credentials (its own file comment). A regressed guard — one where arm()/
+// disarm() fall through to the real stream-connect code instead of staying
+// pure no-ops — touches that Proxy and rejects loudly with the SDK's own
+// auth error; an intact guard never touches it and needs no credentials at
+// all. That makes "no real connection was attempted" a deterministic,
+// network-free assertion instead of the elapsedMs<200 timing heuristic this
+// file used to rely on (Codex gate finding, 2026-07-14) — which was not
+// only flaky under load but, worse, would have let a regression open an
+// ACTUAL websocket to the live Alpaca account on any run where real
+// credentials happened to be configured.
 async function loadConnectorModeProvider(): Promise<Provider> {
+  delete process.env.ALPACA_API_KEY_ID;
+  delete process.env.ALPACA_API_SECRET_KEY;
   process.env.WATCHER_HOST = "connector";
   const mod = await import("./alpaca.ts");
   return mod.alpacaProvider;
@@ -46,10 +62,10 @@ function makeSub(event: Subscription["event"], resource: string): Subscription {
 // p2v Codex gate finding 1: in WATCHER_HOST="connector" mode, arm()/disarm()
 // must be pure registry-bookkeeping no-ops — no stream connect, no REST
 // seed, no trade_updates routing registration. Proven by these resolving
-// immediately (no real network round trip) without needing real Alpaca
-// credentials or a live account — if either had attempted a real
-// connect/REST call, this test would hang or throw against whatever
-// ALPACA_API_KEY_ID/SECRET happens to be configured for the test run.
+// cleanly with NO Alpaca credentials configured at all (loadConnectorModeProvider
+// deletes them) — a regressed guard that fell through to the real connect
+// path would reject here with the SDK's own "Alpaca authentication requires
+// both `keyId` and `secret`" error, not hang or silently succeed.
 test("armPriceCross/disarmPriceCross are no-ops under WATCHER_HOST=connector", async () => {
   const alpacaProvider = await loadConnectorModeProvider();
   const sub = makeSub("price.crossesBelow", "test-watcher-host-symbol");
@@ -64,18 +80,17 @@ test("armOrderFilled/disarmOrderFilled are no-ops under WATCHER_HOST=connector",
   assert.doesNotThrow(() => alpacaProvider.disarm(sub));
 });
 
-test("arming many subscriptions under WATCHER_HOST=connector never opens any real connection (all resolve near-instantly)", async () => {
+// Rewritten (Codex gate finding, 2026-07-14): this used to assert
+// elapsedMs<200 as a proxy for "no real connection was attempted," which is
+// both timing-flaky under load and only a proxy — a slow-but-real connect
+// attempt could still sneak under the threshold. Same deterministic proof as
+// the two tests above, just at bulk-arm scale: no credentials configured, so
+// any arm() call that fell through to the real connect path would reject
+// with the SDK's auth error, not silently take longer.
+test("arming many subscriptions under WATCHER_HOST=connector never opens any real connection", async () => {
   const alpacaProvider = await loadConnectorModeProvider();
-  const start = Date.now();
   const subs = Array.from({ length: 10 }, (_, i) => makeSub("price.crossesAbove", `test-watcher-host-bulk-${i}`));
-  await Promise.all(subs.map((sub) => alpacaProvider.arm(sub)));
-  const elapsedMs = Date.now() - start;
-  // A real stream connect + auth round trip takes well over a second in
-  // practice (existing live-Alpaca tests elsewhere in this suite routinely
-  // take 100s of ms to multiple seconds for a single auth handshake) — ten
-  // arm() calls finishing in well under that is strong evidence no real
-  // network I/O was attempted at all.
-  assert.ok(elapsedMs < 200, `expected near-instant no-op arms, took ${elapsedMs}ms — a real connection may have been attempted`);
+  await assert.doesNotReject(async () => Promise.all(subs.map((sub) => alpacaProvider.arm(sub))));
 });
 
 // Codex gate finding 6 (2026-07-13): WATCHER_HOST must fail closed on a
