@@ -75,12 +75,28 @@ Plan: `docs/plan-vercel-production.md`. Project memory:
    against eve's types but still never exercised live — the current model emits no reasoning
    events; close it out on Phase 4's model; (c) the laptop must stay awake for the campaign's
    clock wake (caffeinate or power settings — Philipp's machine, Philipp's call).
-7. Then the plan: **Phase 4** (mandate agent: DeepSeek V4-Pro + gateway parallelSearch —
-   DECIDED, probe-verified; sell tool; turn cap; instructions rewrite; market-open schedule),
-   **Phase 5** (observatory — observe page is the seed), **Phase 6** (deploy:
-   WATCHER_HOST=connector — now fail-closed on typos — CATALOG_API_SECRET to prod, #7
-   re-verification, task #27 BEFORE the cloud E2E if the E2E uses the test feed, cloud E2E ×2
-   in market hours, one unattended day, THEN the link goes to Pranay).
+7. ~~Phase 4~~ **DONE (2026-07-14 ~00:05Z): built in worktree ../event-catalogue-phase4,
+   branch phase4-mandate (23c905a), three Codex gates (p4a/p4b/p4c, all FAIL→fixed→verified),
+   suite 300/300 lead-run, MERGED to main (fast-forward) and ROLLED OUT locally.** Campaign-5
+   now runs DeepSeek V4-Pro (parallelSearch auto-wired by eve for Gateway models — no override
+   code), has the position-bounded sell tool, per-day turn cap (MAX_TURNS_PER_DAY=200,
+   fail-open), rewritten mandate instructions, and the market-open schedule (inert locally —
+   eve dev never fires cron; the campaign's own clock re-subscription is the local wake).
+   Live-verified post-rollout: DeepSeek turn completed and parked (session
+   wrun_01KXEZ1Z3YK6BQ44W8AX1AF7RZ), re-armed 4 watches (open wake Tue 13:30Z; TSM exit-stop
+   400 / partial-profit 445 — the new exit-discipline instructions visibly working; TSM
+   filings with formTypes), LangSmith thread_id=campaign-5 landing, and the observe page's
+   reasoning bubbles VERIFIED live on real DeepSeek reasoning (the last owed fix-round check).
+   ROLLOUT LEFTOVERS: (a) schedule cron cadence + CAMPAIGN_CONVERSATION_ID env are Phase 6
+   deploy items; (b) 4 dead pre-upgrade campaign-5 rows sit armed in Redis (watchers died with
+   the restart; needs Philipp's deletion approval, same class as the campaign-4 cleanup);
+   (c) observe page: message.appended label flood under DeepSeek (task #28, Phase 5 seed);
+   (d) the agent's summary called Tue 7/14 "Monday" — label-only, armed timestamps correct.
+   Then: **Phase 5** (observatory — observe page is the seed; task #28 first), **Phase 6**
+   (deploy: WATCHER_HOST=connector — now fail-closed on typos — CATALOG_API_SECRET +
+   CAMPAIGN_CONVERSATION_ID to prod, CATALOG_BASE_URL now auto-derives from VERCEL_URL, #7
+   re-verification, task #27 BEFORE the cloud E2E if it uses the test feed, cloud E2E ×2 in
+   market hours, one unattended day, THEN the link goes to Pranay).
 8. Backlog: task #21 (idempotent subscribe_event), task #27 (post-merge gate-C deferrals),
    marker-aware stubs to restore test parallelism, workflow run cancellation path, Deployment
    Protection dashboard toggle (Philipp), Phase-6 note: any explicit forceFlush added for
