@@ -13,7 +13,7 @@
     "dev": "eve dev --no-ui",
     "start": "eve start",
     "typecheck": "tsc",
-    "test": "node --env-file-if-exists=.env.local --test --test-concurrency=1 catalog/*.test.ts catalog/providers/*.test.ts tests/**/*.test.ts connector/lib/*.test.ts"
+    "test": "node --env-file-if-exists=.env.local --test --test-concurrency=1 catalog/*.test.ts catalog/providers/*.test.ts tests/**/*.test.ts connector/lib/*.test.ts observatory/lib/*.test.ts"
   },
   "dependencies": {
     "@alpacahq/alpaca-trade-api": "4.0.0-alpha.3",
