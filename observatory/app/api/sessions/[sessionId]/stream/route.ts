@@ -1,5 +1,18 @@
 import { fetchSessionStream } from "@/lib/catalog-source";
 
+// The upstream stream never closes on its own (fetchSessionStream's own
+// comment) — on Vercel this function is still bound by the plan's Function
+// duration ceiling regardless, so it WILL be cut mid-stream for any session
+// that stays open longer than this. 800s matches the project's existing
+// Fluid GA ceiling choice (connector/nitro.config.ts's own maxDuration:800,
+// docs/plan-vercel-production.md's "800s GA" over the 1800s beta option) —
+// not a new decision, just the same ceiling applied here. This is safe only
+// because the client (use-session-transcript.ts) already reconnects on any
+// stream end/error and the upstream replays full history from index 0 on
+// every reconnect — a forced cutoff here degrades to "reconnects and
+// re-renders" for the viewer, not a permanently broken page.
+export const maxDuration = 800;
+
 // Raw streaming proxy — not the getJson-based shape the other /api/* routes
 // use. The eve app's session stream is durable/never-closing (see
 // fetchSessionStream's comment), so this forwards the upstream body straight

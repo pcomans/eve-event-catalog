@@ -1,12 +1,35 @@
 {
   "services": {
+    "eve": {
+      "root": "./",
+      "framework": "eve"
+    },
     "connector": {
       "root": "connector/",
+      "framework": "nitro",
+      "installCommand": "cd .. && corepack pnpm@10.32.1 install --frozen-lockfile"
+    },
+    "observatory": {
+      "root": "observatory/",
+      "framework": "nextjs",
       "installCommand": "cd .. && corepack pnpm@10.32.1 install --frozen-lockfile"
     }
   },
   "rewrites": [
-    { "source": "/(.*)", "destination": { "service": "connector" } }
+    { "source": "/catalog/(.*)", "destination": { "service": "eve" } },
+    { "source": "/eve/v1/(.*)", "destination": { "service": "eve" } },
+    { "source": "/ensure-running", "destination": { "service": "connector" } },
+    { "source": "/ensure-edgar-running", "destination": { "service": "connector" } },
+    { "source": "/ensure-expiry-running", "destination": { "service": "connector" } },
+    { "source": "/ensure-recovery-running", "destination": { "service": "connector" } },
+    { "source": "/start", "destination": { "service": "connector" } },
+    { "source": "/start-edgar", "destination": { "service": "connector" } },
+    { "source": "/start-expiry", "destination": { "service": "connector" } },
+    { "source": "/start-recovery", "destination": { "service": "connector" } },
+    { "source": "/smoke-test", "destination": { "service": "connector" } },
+    { "source": "/status", "destination": { "service": "connector" } },
+    { "source": "/stop-run", "destination": { "service": "connector" } },
+    { "source": "/(.*)", "destination": { "service": "observatory" } }
   ],
   "crons": [
     { "path": "/ensure-running", "schedule": "*/5 * * * *" },

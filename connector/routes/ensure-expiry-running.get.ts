@@ -3,6 +3,7 @@ import { defineEventHandler } from "nitro/h3";
 
 import { claimSupervisorLock, readHeartbeat } from "../../catalog/providers/chain-guard.ts";
 import { isChainDead } from "../../catalog/providers/chain-supervisor.ts";
+import { requireCronSecret } from "../lib/auth.ts";
 import { EXPIRY_HEARTBEAT_STALE_AFTER_MS, EXPIRY_WORKFLOW_NAME, expirySweepWorkflow } from "../workflows/expiry-sweep.ts";
 
 // The expiry sweep's own supervisor — same one-mechanism-three-jobs pattern
@@ -14,7 +15,8 @@ import { EXPIRY_HEARTBEAT_STALE_AFTER_MS, EXPIRY_WORKFLOW_NAME, expirySweepWorkf
 // than retrofitted later) — two concurrent invocations of this route (an
 // overlapping Cron fire) never both decide to restart the chain. Wired as
 // its own Vercel Cron entry (root vercel.json).
-export default defineEventHandler(async () => {
+export default defineEventHandler(async (event) => {
+  requireCronSecret(event);
   const claimed = await claimSupervisorLock(EXPIRY_WORKFLOW_NAME);
   if (!claimed) return { status: "skipped-concurrent-supervisor-run" };
 

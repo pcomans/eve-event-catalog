@@ -1,10 +1,13 @@
 import { getRun } from "workflow/api";
 import { defineEventHandler, getQuery } from "nitro/h3";
 
+import { requireCronSecret } from "../lib/auth.ts";
+
 // Polls a smoke-test (or any) run's status/return value by runId, without
 // needing the full observability web UI. Throwaway, matching the rest of
 // this smoke test's scope.
 export default defineEventHandler(async (event) => {
+  requireCronSecret(event);
   const { runId } = getQuery(event) as { runId?: string };
   if (!runId) return { error: "missing ?runId=" };
 

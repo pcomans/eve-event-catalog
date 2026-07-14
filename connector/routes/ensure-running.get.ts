@@ -3,6 +3,7 @@ import { defineEventHandler } from "nitro/h3";
 
 import { claimSupervisorLock, readHeartbeat } from "../../catalog/providers/chain-guard.ts";
 import { isChainDead } from "../../catalog/providers/chain-supervisor.ts";
+import { requireCronSecret } from "../lib/auth.ts";
 import {
   HEARTBEAT_STALE_AFTER_MS,
   WORKFLOW_NAME,
@@ -16,10 +17,10 @@ import {
 // nothing else would ever restart it), and "what if the chain dies for any
 // other reason" in general. Wired as a Vercel Cron (root vercel.json,
 // */5 * * * *) hitting this route on a GET, matching Vercel Cron's own
-// invocation convention. Auth is still open, matching every other route in
-// this connector tonight — fine for a preview, not for a real deploy (a
-// public GET that can start a workflow run is exactly the kind of thing
-// that needs the CRON_SECRET check before this goes to production).
+// invocation convention. requireCronSecret gates every invocation on
+// CRON_SECRET (lib/auth.ts) — Vercel attaches the matching bearer header
+// automatically for the actual Cron-triggered calls; any other caller needs
+// the same header supplied by hand.
 //
 // p2v Codex gate finding 7: the heartbeat-read-then-start below is not
 // itself atomic — two concurrent invocations of this route (an overlapping
@@ -30,7 +31,8 @@ import {
 // twice, not two independent runs from being started in the first place.
 // claimSupervisorLock guards the WHOLE decision: only the caller that wins
 // this claim ever reads the heartbeat or calls start() at all.
-export default defineEventHandler(async () => {
+export default defineEventHandler(async (event) => {
+  requireCronSecret(event);
   const claimed = await claimSupervisorLock(WORKFLOW_NAME);
   if (!claimed) return { status: "skipped-concurrent-supervisor-run" };
 

@@ -1,6 +1,8 @@
 import { getRun } from "workflow/api";
 import { defineEventHandler, getQuery } from "nitro/h3";
 
+import { requireCronSecret } from "../lib/auth.ts";
+
 // Cancels a workflow run by runId — the piece HANDOFF-PHASE3.md's "OPEN
 // (Phase 6, not now): find/build a workflow run-cancellation path" flagged
 // as unchased. Turns out no new mechanism was needed: `Run.cancel():
@@ -11,6 +13,7 @@ import { defineEventHandler, getQuery } from "nitro/h3";
 // to stop the item-2/item-3 smoke-test chains after observing one short
 // cycle each, so nothing new is left running besides the EDGAR chain.
 export default defineEventHandler(async (event) => {
+  requireCronSecret(event);
   const { runId } = getQuery(event) as { runId?: string };
   if (!runId) return { error: "missing ?runId=" };
 
