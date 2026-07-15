@@ -2,6 +2,7 @@
 
 import { useId, useMemo, useState } from "react";
 
+import { ET_TIME_ZONE } from "@/lib/et-time";
 import type { EquityPoint } from "@/lib/portfolio-metrics";
 
 // Dataviz skill's reference palette, light mode (this app has no dark-mode
@@ -27,7 +28,9 @@ const TICK_COLLISION_PX = 10;
 // Alpaca's daily bars are labeled by the exchange's trading day. Formatting
 // them in the viewer's local zone would shift the displayed date for a
 // public viewer outside US Eastern — always show the exchange's own zone.
-const TRADING_TIME_ZONE = "America/New_York";
+// Shared with every other timestamp in the app (lib/et-time.ts) so "ET"
+// means the same thing everywhere, not just here.
+const TRADING_TIME_ZONE = ET_TIME_ZONE;
 
 function formatCurrency(value: number): string {
   return value.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
@@ -180,7 +183,8 @@ export function EquityChart({ points }: { points: EquityPoint[] }) {
               dateStyle: "medium",
               timeStyle: "short",
               timeZone: TRADING_TIME_ZONE,
-            })}
+            })}{" "}
+            ET
           </span>
           <span className="font-medium text-foreground">{formatCurrency(hovered.equity)}</span>
         </div>

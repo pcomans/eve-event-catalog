@@ -37,9 +37,17 @@ function signedCurrency(value: number): string {
 // "—" for an individual value that failed to parse — never a fabricated
 // number. Every wire numeric string is parsed exactly once, here, via
 // parseWireNumber (see that module for why Number.isFinite + Number()
-// rather than parseFloat).
+// rather than parseFloat). Table cells only: Philipp's rule reserves the
+// em dash for table no-value placeholders.
 function fmtOrDash(value: number | null, format: (v: number) => string): string {
   return value !== null ? format(value) : "—";
+}
+
+// The stat tiles above the table aren't a table, so a failed-to-parse value
+// there gets "n/a" (rendered muted via StatTile's valueMuted) instead of the
+// em dash reserved for table cells.
+function fmtTile(value: number | null, format: (v: number) => string): string {
+  return value !== null ? format(value) : "n/a";
 }
 
 interface ParsedPosition {
@@ -105,18 +113,20 @@ export function CampaignView({ initialEquity }: { initialEquity: number }) {
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <StatTile
           label="Equity"
-          value={accountLoading ? "…" : fmtOrDash(equity, currency)}
+          value={accountLoading ? "…" : fmtTile(equity, currency)}
+          valueMuted={!accountLoading && equity === null}
           delta={
             equity !== null && lastEquity !== null
               ? { text: `${signedCurrency(equity - lastEquity)} vs. last close`, good: equity - lastEquity >= 0 }
               : undefined
           }
         />
-        <StatTile label="Cash" value={fmtOrDash(cash, currency)} />
-        <StatTile label="Buying power" value={fmtOrDash(buyingPower, currency)} />
+        <StatTile label="Cash" value={fmtTile(cash, currency)} valueMuted={cash === null} />
+        <StatTile label="Buying power" value={fmtTile(buyingPower, currency)} valueMuted={buyingPower === null} />
         <StatTile
           label="Unrealized P&L"
-          value={positionsLoading ? "…" : fmtOrDash(unrealizedPnl, signedCurrency)}
+          value={positionsLoading ? "…" : fmtTile(unrealizedPnl, signedCurrency)}
+          valueMuted={!positionsLoading && unrealizedPnl === null}
           delta={
             !positionsLoading && unrealizedPnl !== null && !isZeroPnl(unrealizedPnl)
               ? { text: unrealizedPnl >= 0 ? "up" : "down", good: unrealizedPnl >= 0 }
@@ -125,7 +135,8 @@ export function CampaignView({ initialEquity }: { initialEquity: number }) {
         />
         <StatTile
           label="Realized P&L"
-          value={pnlLoading ? "…" : fmtOrDash(realizedPnl, signedCurrency)}
+          value={pnlLoading ? "…" : fmtTile(realizedPnl, signedCurrency)}
+          valueMuted={!pnlLoading && realizedPnl === null}
           delta={
             !pnlLoading && realizedPnl !== null && !isZeroPnl(realizedPnl)
               ? { text: realizedPnl >= 0 ? "up" : "down", good: realizedPnl >= 0 }
@@ -135,7 +146,7 @@ export function CampaignView({ initialEquity }: { initialEquity: number }) {
       </div>
 
       <div className="mb-6 rounded-md border p-4">
-        <div className="mb-3 text-sm font-medium">Equity curve — daily close</div>
+        <div className="mb-3 text-sm font-medium">Equity curve (daily close)</div>
         <EquityChart points={equityPoints} />
       </div>
 

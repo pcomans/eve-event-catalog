@@ -43,7 +43,7 @@ function ParamsSummary({ params }: { params: EventType["params"] }) {
     return <p className="text-xs text-destructive">Params schema unavailable.</p>;
   }
   if (fields.length === 0) {
-    return <p className="text-xs text-muted-foreground">No parameters — subscribe with an empty params object.</p>;
+    return <p className="text-xs text-muted-foreground">No parameters. Subscribe with an empty params object.</p>;
   }
   return (
     <dl className="space-y-2">
@@ -131,7 +131,7 @@ export default function CatalogPage() {
     <div className="p-6">
       <h1 className="mb-1 text-lg font-semibold">Catalog</h1>
       <p className="mb-4 max-w-2xl text-sm text-muted-foreground">
-        Every event type this catalog knows how to watch and wake an agent for. This is what&apos;s on offer — for
+        Every event type this catalog knows how to watch and wake an agent for. This is what&apos;s on offer. For
         what&apos;s actually been subscribed to, see Subscriptions.
       </p>
       <div className="grid gap-4">

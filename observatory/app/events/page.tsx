@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { usePolling } from "@/lib/use-polling";
 import { relativeTime } from "@/lib/relative-time";
+import { formatEtTime } from "@/lib/et-time";
 import { StatusBadge } from "@/components/status-badge";
 import type { HistoryEntry } from "@/lib/catalog-types";
 
@@ -51,7 +52,7 @@ export default function EventsPage() {
             {events.map((evt, i) => (
               <tr key={`${evt.subscriptionId}-${evt.timestamp}-${i}`} className="border-t">
                 <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                  {evt.timestamp.slice(11, 19)}
+                  {formatEtTime(evt.timestamp)}
                 </td>
                 <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
                   {relativeTime(evt.timestamp, now)}

@@ -10,7 +10,7 @@
 // generated types/mappers like `Order` and `toStockTrade` live under these
 // namespaces instead (verified against the package's actual dist/index.d.ts;
 // several of these are absent from the README's own top-level import examples).
-import { streaming, Alpaca, marketDataShapes, trading } from "@alpacahq/alpaca-trade-api";
+import { streaming, Alpaca, errors, marketDataShapes, trading } from "@alpacahq/alpaca-trade-api";
 
 import { readCursor } from "./gap-replay-cursor.ts";
 import type { OrderStatusSnapshot } from "./order-reconciliation.ts";
@@ -62,6 +62,40 @@ export const alpacaClient: Alpaca = new Proxy({} as Alpaca, {
   },
 });
 
+/**
+ * Formats an Alpaca SDK request failure for a thrown Error message. Pure.
+ * A production blip surfaced only the SDK's own generic fetchApi wrapper
+ * message ("The request failed and the interceptors did not return an
+ * alternative response") in the public transcript — useless for telling a
+ * fill from a rate limit from a network blip. What the v4 alpha SDK's
+ * errors.* classes actually carry (inspected directly): `errors.ApiError`
+ * (thrown for any non-2xx response, via errors.buildApiError) already has
+ * `.status` and a `.message` pre-parsed from the response body's `message`
+ * field (or the raw body text, or a generic "HTTP <status>" fallback if the
+ * body wasn't readable) — no extra body-snippet parsing needed here.
+ * `errors.FetchError` is the one that produces that opaque message above:
+ * it's thrown when the underlying `fetch()` itself failed (DNS, TLS,
+ * connection reset) BEFORE any response came back, so it carries only
+ * `.cause` (the raw failure) and nothing about the endpoint — hence the
+ * caller-supplied `endpoint` label, the one thing every call site already
+ * knows and the SDK's own error object doesn't.
+ */
+export function describeAlpacaError(endpoint: string, error: unknown): Error {
+  if (error instanceof errors.ApiError) {
+    return new Error(`Alpaca ${error.status} on ${endpoint}: ${error.message}`, { cause: error });
+  }
+  if (error instanceof errors.FetchError) {
+    const causeMessage = error.cause instanceof Error ? error.cause.message : String(error.cause);
+    return new Error(`Alpaca request to ${endpoint} failed before a response came back: ${causeMessage}`, {
+      cause: error,
+    });
+  }
+  if (error instanceof Error) {
+    return new Error(`Alpaca request to ${endpoint} failed: ${error.message}`, { cause: error });
+  }
+  return new Error(`Alpaca request to ${endpoint} failed: ${String(error)}`);
+}
+
 export interface AlpacaAccount {
   id: string;
   status: string;
@@ -72,7 +106,9 @@ export interface AlpacaAccount {
 }
 
 export async function getAccount(): Promise<AlpacaAccount> {
-  const account = await alpacaClient.trading.account.getAccount();
+  const account = await alpacaClient.trading.account
+    .getAccount()
+    .catch((e: unknown) => Promise.reject(describeAlpacaError("/v2/account", e)));
   return {
     id: account.id,
     status: account.status,
@@ -93,7 +129,9 @@ export interface AlpacaPosition {
 }
 
 export async function getPositions(): Promise<AlpacaPosition[]> {
-  const positions = await alpacaClient.trading.positions.getAllOpenPositions();
+  const positions = await alpacaClient.trading.positions
+    .getAllOpenPositions()
+    .catch((e: unknown) => Promise.reject(describeAlpacaError("/v2/positions", e)));
   return positions.map((position) => ({
     symbol: position.symbol,
     side: position.side,
@@ -154,16 +192,20 @@ export async function submitOrder(input: SubmitOrderInput): Promise<AlpacaOrder>
   // input.type/time_in_force describe this seam's (deliberately narrow)
   // input contract for callers, not passed through literally — the ergonomic
   // builder only ever places market orders and defaults timeInForce to "day".
-  const order = await alpacaClient.trading.orders.market(
-    input.notional !== undefined
-      ? { symbol: input.symbol, side: input.side, notional: input.notional }
-      : { symbol: input.symbol, side: input.side, qty: input.qty },
-  );
+  const order = await alpacaClient.trading.orders
+    .market(
+      input.notional !== undefined
+        ? { symbol: input.symbol, side: input.side, notional: input.notional }
+        : { symbol: input.symbol, side: input.side, qty: input.qty },
+    )
+    .catch((e: unknown) => Promise.reject(describeAlpacaError("/v2/orders", e)));
   return normalizeOrder(order);
 }
 
 export async function getOrder(orderId: string): Promise<AlpacaOrder> {
-  const order = await alpacaClient.trading.orders.getOrderByOrderID({ orderId });
+  const order = await alpacaClient.trading.orders
+    .getOrderByOrderID({ orderId })
+    .catch((e: unknown) => Promise.reject(describeAlpacaError(`/v2/orders/${orderId}`, e)));
   return normalizeOrder(order);
 }
 
@@ -218,7 +260,9 @@ export async function getLatestTrade(symbol: string, feed: DataFeed): Promise<La
     );
   }
 
-  const resp = await alpacaClient.marketData.stocks.stockLatestTradeSingle({ symbol, feed });
+  const resp = await alpacaClient.marketData.stocks
+    .stockLatestTradeSingle({ symbol, feed })
+    .catch((e: unknown) => Promise.reject(describeAlpacaError(`/v2/stocks/${symbol}/trades/latest`, e)));
   const trade = toStockTrade(resp.trade, symbol);
   return { price: trade.price, timestamp: trade.timestamp.toISOString() };
 }
@@ -240,7 +284,14 @@ export async function getHistoricalTrades(
 
   const start = cursor ? new Date(cursor.timestamp) : new Date(Date.now() - NO_CURSOR_LOOKBACK_MS);
   const end = new Date();
-  const trades = await alpacaClient.marketData.getStockTradesFor(symbol, { start, end, feed });
+  // getStockTradesFor(symbol, ...) is a single-symbol convenience wrapper
+  // around the SDK's multi-symbol getStockTrades, which hits the actual
+  // wire route GET /v2/stocks/trades?symbols=<symbol> (verified against
+  // the installed SDK's stockTradesRaw: `symbols` is a query param, not a
+  // path segment — there is no per-symbol /v2/stocks/:symbol/trades route).
+  const trades = await alpacaClient.marketData
+    .getStockTradesFor(symbol, { start, end, feed })
+    .catch((e: unknown) => Promise.reject(describeAlpacaError(`/v2/stocks/trades?symbols=${symbol}`, e)));
   return trades.map((trade) => ({
     id: trade.id ?? 0,
     exchange: trade.exchange ?? "",
@@ -279,10 +330,27 @@ export async function getHistoricalTrades(
 // batch — Promise.allSettled, silently skipping that one order this sweep;
 // it's re-checked on the next cadence tick regardless.
 export async function getOrderStatuses(orderIds: string[]): Promise<OrderStatusSnapshot[]> {
-  const results = await Promise.allSettled(orderIds.map((orderId) => alpacaClient.trading.orders.getOrderByOrderID({ orderId })));
+  const results = await Promise.allSettled(
+    orderIds.map((orderId) =>
+      alpacaClient.trading.orders
+        .getOrderByOrderID({ orderId })
+        .catch((e: unknown) => Promise.reject(describeAlpacaError(`/v2/orders/${orderId}`, e))),
+    ),
+  );
   const statuses: OrderStatusSnapshot[] = [];
   for (const result of results) {
-    if (result.status === "rejected") continue;
+    if (result.status === "rejected") {
+      // Swallow semantics unchanged (the batch survives, this order is
+      // re-checked next sweep) — but the reason is now describeAlpacaError-
+      // formatted (endpoint + status), so a PERSISTENT failure leaves
+      // actionable evidence instead of vanishing silently.
+      try {
+        console.warn(`[getOrderStatuses] order lookup failed, skipping this sweep: ${result.reason}`);
+      } catch {
+        // Logging must never break the batch contract.
+      }
+      continue;
+    }
     const order = result.value;
     statuses.push({
       orderId: order.id!,

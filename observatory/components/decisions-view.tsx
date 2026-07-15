@@ -9,26 +9,11 @@ import {
   ConversationScrollButton,
 } from "@/components/ai-elements/conversation";
 import { DecisionMessage } from "@/components/decision-message";
-import { StatusBadge } from "@/components/status-badge";
-import type { ConversationRecord, HistoryEntry } from "@/lib/catalog-types";
+import { TimelineEvent } from "@/components/timeline-event";
+import type { ConversationRecord, HistoryEntry, Subscription } from "@/lib/catalog-types";
 import { interleaveTimeline } from "@/lib/interleave-timeline";
 import { usePolling } from "@/lib/use-polling";
 import { useSessionTranscript } from "@/lib/use-session-transcript";
-
-// Deliberately smaller/quieter than a Message bubble — this is context
-// between the agent's turns (e.g. the wake that wound the clock right
-// before a turn starts), not content competing with them for attention.
-function TimelineEvent({ event }: { event: HistoryEntry }) {
-  return (
-    <div className="flex w-fit items-center gap-2 self-center rounded-md border bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
-      <span className="font-mono">{event.timestamp.slice(11, 19)}</span>
-      <span>
-        {event.action} — {event.provider}·{event.event}
-      </span>
-      <StatusBadge status={event.status} />
-    </div>
-  );
-}
 
 // The caller (app/decisions/page.tsx) renders this keyed on conversationId
 // — `<DecisionsView key={conversationId} .../>` — so a conversationId
@@ -88,6 +73,26 @@ export function DecisionsView({ conversationId }: { conversationId: string }) {
   const events = allEvents.filter((e) => e.conversationId === conversationId);
   const timeline = interleaveTimeline(messages, events);
 
+  // task #39: an expanded event marker shows its linked subscription's own
+  // attributes. Reuses the Subscriptions page's own poll target (no new eve
+  // route) — matched client-side by id, since a subscription can outlive
+  // (or be deleted independently of) any one HistoryEntry that references
+  // it. Not filtered by conversationId: a subscriptionId is already globally
+  // unique, so the full list is the correct lookup set.
+  //
+  // p6o gate (MED): loading/error are threaded into TimelineEvent alongside
+  // the lookup itself — a subscription absent from `data` means three
+  // different things (still loading, this poll failed, or it's genuinely
+  // gone) and only the last one is true "no longer in registry". Collapsing
+  // all three into one `!subscription` check made the marker assert a false
+  // "removed" claim during the initial load or any later poll error.
+  const {
+    data: subscriptions,
+    error: subscriptionsError,
+    loading: subscriptionsLoading,
+  } = usePolling<Subscription[]>("/api/subscriptions", []);
+  const subscriptionsById = new Map(subscriptions.map((s) => [s.id, s]));
+
   const error = resolveError ?? streamError;
 
   return (
@@ -113,7 +118,13 @@ export function DecisionsView({ conversationId }: { conversationId: string }) {
             item.kind === "message" ? (
               <DecisionMessage key={item.message.id} message={item.message} />
             ) : (
-              <TimelineEvent key={`${item.event.subscriptionId}:${item.event.action}:${item.at}`} event={item.event} />
+              <TimelineEvent
+                key={`${item.event.subscriptionId}:${item.event.action}:${item.at}`}
+                event={item.event}
+                subscription={subscriptionsById.get(item.event.subscriptionId)}
+                subscriptionsLoading={subscriptionsLoading}
+                subscriptionsError={subscriptionsError}
+              />
             ),
           )}
         </ConversationContent>

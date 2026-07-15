@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Event Catalog — Observatory",
+  title: "Event Catalog: Observatory",
   description: "Read-only public view of live catalog subscriptions and events.",
 };
 

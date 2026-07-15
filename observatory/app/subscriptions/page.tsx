@@ -3,6 +3,7 @@
 import { usePolling } from "@/lib/use-polling";
 import { StatusBadge } from "@/components/status-badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { formatEtTime } from "@/lib/et-time";
 import type { Subscription } from "@/lib/catalog-types";
 
 function short(id: string) {
@@ -10,7 +11,7 @@ function short(id: string) {
 }
 
 function fmtTime(iso: string | null) {
-  return iso ? iso.slice(11, 19) : "—";
+  return iso ? formatEtTime(iso) : "—";
 }
 
 function MonoTooltip({ full, children }: { full: string; children: React.ReactNode }) {
@@ -20,6 +21,21 @@ function MonoTooltip({ full, children }: { full: string; children: React.ReactNo
       <TooltipContent>{full}</TooltipContent>
     </Tooltip>
   );
+}
+
+// Real conversationIds are short, human-chosen campaign labels
+// (CAMPAIGN_CONVERSATION_ID, e.g. "campaign-6") — the only genuinely long
+// values are the test-fixture uuids, which the /api/subscriptions proxy
+// already filters out (task #36, is-test-fixture-conversation.ts). Only
+// truncate+tooltip if one somehow still shows up long; short ids render in
+// full so distinct campaigns stay visually distinct.
+const CONVERSATION_TRUNCATE_THRESHOLD = 20;
+
+function ConversationCell({ id }: { id: string }) {
+  if (id.length <= CONVERSATION_TRUNCATE_THRESHOLD) {
+    return <span className="font-mono text-xs">{id}</span>;
+  }
+  return <MonoTooltip full={id}>{short(id)}</MonoTooltip>;
 }
 
 export default function SubscriptionsPage() {
@@ -72,7 +88,7 @@ export default function SubscriptionsPage() {
                   <MonoTooltip full={sub.id}>{short(sub.id)}</MonoTooltip>
                 </td>
                 <td className="px-3 py-2">
-                  <MonoTooltip full={sub.conversationId}>{short(sub.conversationId)}</MonoTooltip>
+                  <ConversationCell id={sub.conversationId} />
                 </td>
                 <td className="px-3 py-2">
                   {sub.provider} / {sub.event}

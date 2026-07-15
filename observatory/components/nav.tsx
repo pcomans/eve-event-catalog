@@ -18,7 +18,7 @@ export function Nav() {
 
   return (
     <header className="flex items-baseline gap-6 border-b px-6 py-4">
-      <span className="text-sm font-semibold tracking-tight">Event Catalog — Observatory</span>
+      <span className="text-sm font-semibold tracking-tight">Event Catalog: Observatory</span>
       <nav className="flex gap-4">
         {LINKS.map((link) => (
           <Link
