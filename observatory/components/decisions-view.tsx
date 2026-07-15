@@ -40,6 +40,12 @@ function TimelineEvent({ event }: { event: HistoryEntry }) {
 export function DecisionsView({ conversationId }: { conversationId: string }) {
   const [conversation, setConversation] = useState<ConversationRecord | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
+  // A 404 here means "no conversation record exists yet" — the pre-launch
+  // state (the campaign's first turn hasn't happened) and a typo'd/nonexistent
+  // ?conversation= override are the SAME semantic (per task #35): neither is
+  // a genuine failure, so it's tracked separately from resolveError (network
+  // errors, 500s, ...) rather than lumped into one generic message.
+  const [conversationNotFound, setConversationNotFound] = useState(false);
   const [resolving, setResolving] = useState(true);
 
   useEffect(() => {
@@ -48,12 +54,17 @@ export function DecisionsView({ conversationId }: { conversationId: string }) {
 
     fetch(`/api/conversations/${encodeURIComponent(conversationId)}`, { signal: controller.signal })
       .then((res) => {
+        if (res.status === 404) return null;
         if (!res.ok) throw new Error(`conversations/${conversationId} -> ${res.status}`);
         return res.json() as Promise<ConversationRecord>;
       })
       .then((record) => {
         if (!cancelled) {
-          setConversation(record);
+          if (record === null) {
+            setConversationNotFound(true);
+          } else {
+            setConversation(record);
+          }
           setResolving(false);
         }
       })
@@ -86,7 +97,13 @@ export function DecisionsView({ conversationId }: { conversationId: string }) {
       <Conversation className="h-[75vh] rounded-md border">
         <ConversationContent>
           {resolving && <p className="text-center text-sm text-muted-foreground">Loading…</p>}
-          {!resolving && timeline.length === 0 && !error && (
+          {!resolving && conversationNotFound && (
+            <ConversationEmptyState
+              description="The campaign's first turn happens at the next market open (13:30 UTC, weekdays)."
+              title="No turns yet"
+            />
+          )}
+          {!resolving && !conversationNotFound && timeline.length === 0 && !error && (
             <ConversationEmptyState
               description={`Waiting for ${conversationId} to start its next turn.`}
               title="No messages yet"

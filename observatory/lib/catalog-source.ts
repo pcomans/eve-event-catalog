@@ -21,7 +21,26 @@ export function fetchEvents(signal?: AbortSignal) {
   return getJson<HistoryEntry[]>("/catalog/events", signal);
 }
 
-/** Resolves a conversationId to its ConversationRecord, or null on a 404 (unknown conversationId). */
+/**
+ * Resolves a conversationId to its ConversationRecord, or null ONLY for
+ * eve's own genuine "no conversation record exists yet" 404 — used by
+ * decisions-view.tsx (task #35) to render the pre-launch empty state
+ * instead of a raw error.
+ *
+ * p6k gate (LOW): a bare `res.status === 404 -> null` treated EVERY 404 as
+ * that one healthy semantic — a wrong CATALOG_API_BASE_URL, a misrouted or
+ * stale eve deployment with no /catalog/conversations route at all, or any
+ * other platform/framework 404 would ALSO answer 404 and be silently
+ * presented as "the campaign just hasn't started yet" instead of the real
+ * infrastructure problem it is. eve's own route
+ * (agent/channels/catalog.ts, GET /catalog/conversations/:conversationId)
+ * has exactly one 404 body, quoted directly from its source:
+ *   `Response.json({ error: "unknown conversationId" }, { status: 404 })`
+ * Only a 404 whose body matches that EXACT machine-readable shape is
+ * treated as "unknown conversation" -> null; any other 404 (a different
+ * body, no body, non-JSON) becomes a thrown error instead, same as any
+ * other non-2xx status already does below.
+ */
 export async function fetchConversation(
   conversationId: string,
   signal?: AbortSignal,
@@ -30,7 +49,33 @@ export async function fetchConversation(
     cache: "no-store",
     signal,
   });
-  if (res.status === 404) return null;
+  if (res.status === 404) {
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      throw new Error(`/catalog/conversations/${conversationId} -> 404 with a non-JSON body (not eve's own unknown-conversationId response)`);
+    }
+    // p6l gate (LOW): a `body.error === "unknown conversationId"` check
+    // ALONE would still normalize a superset body — e.g.
+    // `{ error: "unknown conversationId", detail: "misrouted/stale
+    // handler" }` — to the same "healthy no-conversation" null, even
+    // though that's not eve's own route response verbatim. Require the
+    // EXACT one-field shape: a non-array object whose ONLY own key is
+    // `error`, with exactly that string value.
+    const isKnownUnknownConversationShape =
+      typeof body === "object" &&
+      body !== null &&
+      !Array.isArray(body) &&
+      Object.keys(body).length === 1 &&
+      (body as Record<string, unknown>).error === "unknown conversationId";
+    if (!isKnownUnknownConversationShape) {
+      throw new Error(
+        `/catalog/conversations/${conversationId} -> 404 with an unrecognized body (not eve's own unknown-conversationId response): ${JSON.stringify(body)}`,
+      );
+    }
+    return null;
+  }
   if (!res.ok) throw new Error(`/catalog/conversations/${conversationId} -> ${res.status}`);
   return res.json() as Promise<ConversationRecord>;
 }
