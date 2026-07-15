@@ -22,19 +22,24 @@
     { "source": "/ensure-edgar-running", "destination": { "service": "connector" } },
     { "source": "/ensure-expiry-running", "destination": { "service": "connector" } },
     { "source": "/ensure-recovery-running", "destination": { "service": "connector" } },
+    { "source": "/ensure-clock-running", "destination": { "service": "connector" } },
     { "source": "/start", "destination": { "service": "connector" } },
     { "source": "/start-edgar", "destination": { "service": "connector" } },
     { "source": "/start-expiry", "destination": { "service": "connector" } },
     { "source": "/start-recovery", "destination": { "service": "connector" } },
+    { "source": "/start-clock", "destination": { "service": "connector" } },
     { "source": "/smoke-test", "destination": { "service": "connector" } },
     { "source": "/status", "destination": { "service": "connector" } },
     { "source": "/stop-run", "destination": { "service": "connector" } },
+    { "source": "/market-open-turn", "destination": { "service": "connector" } },
     { "source": "/(.*)", "destination": { "service": "observatory" } }
   ],
   "crons": [
     { "path": "/ensure-running", "schedule": "*/5 * * * *" },
     { "path": "/ensure-edgar-running", "schedule": "*/5 * * * *" },
     { "path": "/ensure-expiry-running", "schedule": "*/5 * * * *" },
-    { "path": "/ensure-recovery-running", "schedule": "*/5 * * * *" }
+    { "path": "/ensure-recovery-running", "schedule": "*/5 * * * *" },
+    { "path": "/ensure-clock-running", "schedule": "*/5 * * * *" },
+    { "path": "/market-open-turn", "schedule": "30 13 * * 1-5" }
   ]
 }

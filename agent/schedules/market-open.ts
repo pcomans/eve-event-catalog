@@ -35,6 +35,23 @@ function log(line: string) {
 // POST /catalog/wake — same base URL, same bearer-secret auth — so a schedule
 // run is authenticated and turn-capped (catalog/turn-cap.ts) exactly like
 // any other call into that route, with no separate mechanism to keep in sync.
+//
+// NOT THE OPERATIVE TRANSPORT IN PRODUCTION (verified 2026-07-14): on
+// Vercel Services mode, this defineSchedule's auto-generated cron does not
+// register — `vercel crons ls` shows only the top-level ensure-* supervisor
+// entries from root vercel.json, and eve's own emitted `/eve/v1/cron/<hash>`
+// route 404s from eve's own production router. Services mode appears to
+// drop per-service build-output crons entirely; root-caused no further
+// than that (eve's own transport here is opaque from outside the
+// framework). The connector now owns this mechanism instead of chasing it:
+// connector/routes/market-open-turn.get.ts ports this file's own `run()`
+// body faithfully (same guards, same message, same base-URL resolution)
+// behind requireCronSecret, wired via an explicit root vercel.json `crons`
+// entry + rewrite — same "own the mechanism" pattern as the ensure-*
+// supervisors right alongside it. THIS file is left in place, unchanged in
+// behavior, for an eve-native (non-services) environment where its own
+// cron DOES register; it is not currently what fires the 13:30 UTC
+// campaign turn on the deployed system.
 export default defineSchedule({
   cron: "30 13 * * 1-5",
   async run() {

@@ -14,7 +14,17 @@ import { getWakeDeliveryMarker } from "../../catalog/wake.ts";
 
 const TERMINAL_STATUSES = new Set<SubscriptionStatus>(["fired", "expired", "failed"]);
 
-const CATALOG_BASE_URL = process.env.CATALOG_BASE_URL ?? `http://localhost:${process.env.PORT ?? 2000}`;
+// Exported so every connector route that self-POSTs into eve (this file's
+// own wake delivery below, and routes/market-open-turn.get.ts) resolves
+// eve's base URL the SAME way — one mechanism, not a second copy that could
+// drift. Deliberately simpler than catalog/wake.ts's own
+// resolveCatalogBaseUrl (which also falls back to the Vercel-injected
+// VERCEL_URL): this connector service's wake delivery has run in
+// production against a real deploy already (order fills, price crossings)
+// using exactly this two-branch form, so CATALOG_BASE_URL being a real,
+// already-provisioned env var is a proven-sufficient precedent here, not a
+// gap to close by importing the fancier fallback.
+export const CATALOG_BASE_URL = process.env.CATALOG_BASE_URL ?? `http://localhost:${process.env.PORT ?? 2000}`;
 
 function log(line: string): void {
   console.log(`[connector] ${line}`);

@@ -120,10 +120,10 @@
       "tags": ["timer", "clock", "schedule", "time", "wake", "self-scheduled"],
       "metadata": {
         "freshness": "exact",
-        "latency": "~0 (in-process timer)",
+        "latency": "~0 in local dev (in-process timer); in production, this fires via a durable 30s sweep, so up to ~30s after the moment you set",
         "auth": "none",
         "cost": "free",
-        "durability": "in-process timer; lost on server restart"
+        "durability": "local dev: in-process timer, lost on server restart. Production (Vercel): a durable Redis-backed due-time index, survives restarts and deploys; a connector sweep checks it every ~30s"
       },
       "onWake": "This is the timer YOU set — it is not an external event, so nothing about the world necessarily changed just because this fired. Time has passed since you subscribed: re-check whatever you were actually waiting on (prices, positions, filings, anything else relevant) before acting on it. Do not assume anything you believed true at subscribe time still holds now."
     }

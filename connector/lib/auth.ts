@@ -7,10 +7,14 @@ import { isAuthorizedHeader } from "../../catalog/auth.ts";
  * 2026-07-14, docs/plan-vercel-production.md's routing note): Vercel's own
  * CRON_SECRET convention (vercel.com/docs/cron-jobs/manage-cron-jobs) —
  * once CRON_SECRET is set as a project env var, Vercel automatically sends
- * it as `Authorization: Bearer $CRON_SECRET` on the four routes actually
- * registered as Crons in the root vercel.json; the other seven manual/
- * smoke-test routes here get no such automatic header, so reaching them
- * requires a caller to supply the same header by hand. One shared secret
+ * it as `Authorization: Bearer $CRON_SECRET` on every route registered as a
+ * Cron in the root vercel.json's own `crons` array; every other route here
+ * (manual triggers, smoke tests) gets no such automatic header, so reaching
+ * them requires a caller to supply the same header by hand. Deliberately
+ * phrased by MECHANISM, not by a route count — vercel.json's own `crons`
+ * array and this directory's own route list are each a growing, separately-
+ * maintained source of truth; a hardcoded total here would just go stale
+ * again the next time either one changes. One shared secret
  * for the whole service (not a second one alongside eve's own
  * CATALOG_API_SECRET) — reuses catalog/auth.ts's isAuthorizedHeader for the
  * actual comparison rather than re-implementing it.

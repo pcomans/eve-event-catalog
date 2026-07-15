@@ -2,6 +2,7 @@ import type { Subscription } from "../types.ts";
 import { registerProvider, type Provider } from "../catalog.ts";
 import { getSubscription } from "../registry.ts";
 import { deliverWake } from "../wake.ts";
+import { addClockDue, removeClockDue } from "./clock-redis.ts";
 
 function log(line: string) {
   console.log(`[clock] ${line}`);
@@ -11,11 +12,42 @@ function getAt(sub: Subscription): string {
   return (sub.params as { at: string }).at;
 }
 
-// In-process only — same documented boundary as wake.ts's own expiry
-// timers (scheduleExpiry/cancelExpiry): lost on a server restart. A durable
-// variant rides Phase 3's migration of the expiry mechanism to a persisted
-// driver; not built here (AGENTS.md rule 1 — no engineering ahead of what
-// this task needs).
+// Same WATCHER_HOST convention as alpaca.ts (duplicated per-module, per
+// KNOWN_ISSUES.md #2's "read once at module load" rule — not shared, for
+// the same reason alpaca-client.ts's own comment gives: a cross-module
+// import-time throw could crash an unrelated bundle). "in-process" (default
+// — local dev, and the ONLY mode this provider supported until the launch
+// blocker below) keeps arm()/disarm() exactly as this file always had them
+// — a bare setTimeout. "connector" switches to a durable due-time index
+// (clock-redis.ts) instead — see arm()/disarm() below. Fail closed on
+// anything else, same as alpaca.ts's own resolveWatcherHost.
+const WATCHER_HOST = resolveWatcherHost(process.env.WATCHER_HOST);
+
+function resolveWatcherHost(value: string | undefined): "in-process" | "connector" {
+  if (value === undefined) return "in-process";
+  if (value === "in-process" || value === "connector") return value;
+  throw new Error(
+    `WATCHER_HOST=${JSON.stringify(value)} is invalid — must be exactly "in-process" or "connector" ` +
+      `(unset also defaults to "in-process"). Refusing to boot rather than silently treating an ` +
+      `unrecognized value as "in-process".`,
+  );
+}
+
+// LAUNCH BLOCKER, FIXED (production finding, 2026-07-14): clock.time.at
+// wakes could never fire on Vercel — this provider's arm() only ever
+// scheduled the in-process setTimeout below, which arms inside an
+// ephemeral function and dies with it, silently violating AGENTS.md rule 4
+// (the catalog can't advertise an event type that never actually fires).
+// The setTimeout path below is UNCHANGED and stays exactly as-is for local
+// dev (WATCHER_HOST unset/"in-process" — a long-lived dev server, same
+// "one code path, two hosts" convention as the alpaca legs). In connector
+// mode, arm()/disarm() instead register/remove the row in a durable
+// due-time index (catalog/providers/clock-redis.ts) that
+// catalog/providers/clock-sweep.ts's own connector-side sweep
+// (connector/workflows/clock-sweep.ts, 30s cadence) reads — see that
+// module's own doc comment for the full mechanism and its one accepted
+// trade-off (up to ~30s wake lateness in connector mode vs. setTimeout's
+// sub-second precision locally).
 //
 // One record per armed subscription, kept alive for the subscription's
 // ENTIRE lifecycle (not just while a timer happens to be pending) — a
@@ -187,11 +219,25 @@ function scheduleRetry(subscriptionId: string): void {
 
 async function arm(sub: Subscription): Promise<void> {
   const targetMs = new Date(getAt(sub)).getTime();
+
+  if (WATCHER_HOST === "connector") {
+    // No in-process timer at all — the connector's own durable sweep
+    // (clock-sweep.ts) is what actually delivers this wake. Registering
+    // the row here is the ENTIRE job in this mode.
+    await addClockDue(sub.id, targetMs);
+    return;
+  }
+
   clockState.set(sub.id, { timer: null, cancelled: false, inFlight: false }); // fresh record — a stale flag from a prior lifecycle must not leak in
   scheduleTimer(sub.id, targetMs);
 }
 
 async function disarm(sub: Subscription): Promise<void> {
+  if (WATCHER_HOST === "connector") {
+    await removeClockDue(sub.id);
+    return;
+  }
+
   const state = clockState.get(sub.id);
   if (!state) return; // never armed, or already fully cleaned up — nothing to do
   if (state.timer) clearTimeout(state.timer);
