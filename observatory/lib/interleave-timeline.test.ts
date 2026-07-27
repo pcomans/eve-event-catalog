@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 
 import { interleaveTimeline, type TimelineMessage } from "./interleave-timeline.ts";
 import type { HistoryEntry } from "./catalog-types.ts";
@@ -11,6 +12,7 @@ function msg(id: string, at: string): TimelineMessage {
 
 function evt(subscriptionId: string, at: string, action = "arm"): HistoryEntry {
   return {
+    id: randomUUID(),
     action,
     timestamp: at,
     subscriptionId,

@@ -16,6 +16,7 @@ import type { HistoryEntry, Subscription } from "@/lib/catalog-types";
 // unknown` index signature is exactly this: a provider/action-specific
 // grab bag).
 const HISTORY_ENTRY_KNOWN_FIELDS = new Set([
+  "id",
   "action",
   "timestamp",
   "subscriptionId",

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 
 import { EVENT_FEED_WINDOW_SIZE, mergeEventFeedWindow } from "./event-feed-window.ts";
@@ -6,6 +7,7 @@ import type { EventFeedResponse, HistoryEntry } from "./catalog-types.ts";
 
 function row(subscriptionId: string): HistoryEntry {
   return {
+    id: randomUUID(),
     action: "arm",
     timestamp: "2026-07-14T13:30:00.000Z",
     subscriptionId,
@@ -26,12 +28,19 @@ test("mergeEventFeedWindow: a reset response replaces the window outright", () =
 });
 
 test("mergeEventFeedWindow: a delta prepends its rows onto the front of what's there", () => {
-  const prev = [row("older-1"), row("older-2")];
-  const feed: EventFeedResponse = { cursor: "c2", reset: false, events: [row("newest")] };
+  const older1 = row("older-1");
+  const older2 = row("older-2");
+  const newest = row("newest");
+  const prev = [older1, older2];
+  const feed: EventFeedResponse = { cursor: "c2", reset: false, events: [newest] };
 
   const result = mergeEventFeedWindow(prev, feed);
 
-  assert.deepEqual(result, [row("newest"), row("older-1"), row("older-2")]);
+  // Reuses the SAME row objects rather than calling row() again for the
+  // expected value — each call mints a fresh id, so two independently
+  // constructed "older-1" rows are no longer equal (same reasoning as
+  // event-feed.test.ts's row() comment).
+  assert.deepEqual(result, [newest, older1, older2]);
 });
 
 test("mergeEventFeedWindow: an empty delta (unchanged cursor) leaves the window untouched", () => {
