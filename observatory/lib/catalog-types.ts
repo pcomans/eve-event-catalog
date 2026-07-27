@@ -30,6 +30,11 @@ export interface Subscription {
 }
 
 export interface HistoryEntry {
+  // Per-occurrence identifier (crypto.randomUUID(), minted by recordEvent on
+  // every write) — see catalog/history.ts's own HistoryEntry.id comment for
+  // why this exists (a true per-occurrence content-hash cursor) and the
+  // accepted duplicate-retry semantics it deliberately leaves in place.
+  id: string;
   action: string;
   timestamp: string;
   subscriptionId: string;

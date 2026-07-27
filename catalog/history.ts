@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Redis } from "@upstash/redis";
 
 import { computeCursor, computeFeedResponse, EVENT_FEED_PAGE_SIZE, type EventFeedResponse } from "./event-feed.ts";
@@ -17,6 +18,32 @@ const HISTORY_MAX_ENTRIES = 2000;
 
 /** One row of the public, read-only event-history feed (GET /catalog/events). No secrets belong here. */
 export interface HistoryEntry {
+  /**
+   * Per-occurrence identifier, minted fresh by recordEvent on every call
+   * (crypto.randomUUID()) — NOT the subscriptionId, which many rows share
+   * across their lifecycle. Exists purely so computeCursor's content hash
+   * (event-feed.ts) is a true per-occurrence cursor: two rows that happen
+   * to be identical in every OTHER field (same action/status/timestamp,
+   * e.g. two lifecycle events landing in the same millisecond) still get
+   * distinct hashes and neither can shadow the other's position when
+   * fetchEventFeed anchors on a cursor.
+   *
+   * The flip side is intentional and accepted, not a gap this field leaves
+   * open: a Redis-level retry of the exact same LPUSH (the @upstash/redis
+   * client auto-retries transient failures — see KNOWN_ISSUES.md #12) would
+   * re-send the literal same entry object, same id included, so the
+   * resulting duplicate row hashes identically to the original. Collapsing
+   * that into the LINDEX fast path's "unchanged" response is correct
+   * behavior: a retried write of the same occurrence is not a new
+   * occurrence.
+   *
+   * Declared limit: rows written before this field existed, and any
+   * still-running old workflow execution writing during the deploy window
+   * that introduced it, have no id and remain theoretically
+   * hash-collidable under the old rules. Accepted — they age out of the
+   * 100-row feed window within minutes at any real event rate.
+   */
+  id: string;
   action: string;
   timestamp: string;
   subscriptionId: string;
@@ -49,6 +76,7 @@ export async function recordEvent(
     // is always overwritten by the real value, never the reverse — same
     // shadowing discipline as buildWakeEnvelope's nested payload (wake.ts).
     ...extra,
+    id: randomUUID(),
     action,
     timestamp: new Date().toISOString(),
     subscriptionId: sub.id,

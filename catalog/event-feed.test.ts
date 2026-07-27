@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 
 import { computeCursor, computeFeedResponse } from "./event-feed.ts";
@@ -9,8 +10,15 @@ import type { HistoryEntry } from "./history.ts";
 // previous cursor; see history.ts's fetchEventFeed for the thin Redis
 // wrapper this backs. Design: /tmp/codex-eventdriven-final.txt.
 
+// Each call mints its own random `id`, same as the real recordEvent — so
+// two independently-constructed rows are never accidentally identical, even
+// when every other field matches (e.g. two calls with the same
+// subscriptionId). `extra` spreads last, so a test that specifically needs
+// two rows to collide (or wants explicit control over `id`) can still force
+// that — see the "identical except id" tests below.
 function row(subscriptionId: string, extra: Record<string, unknown> = {}): HistoryEntry {
   return {
+    id: randomUUID(),
     action: "arm",
     timestamp: "2026-07-14T13:30:00.000Z",
     subscriptionId,
@@ -22,12 +30,37 @@ function row(subscriptionId: string, extra: Record<string, unknown> = {}): Histo
   };
 }
 
-test("computeCursor: two structurally identical rows hash to the same cursor", () => {
-  assert.equal(computeCursor(row("a")), computeCursor(row("a")));
+test("computeCursor: hashing the same row twice is deterministic", () => {
+  const r = row("a");
+  assert.equal(computeCursor(r), computeCursor(r));
 });
 
 test("computeCursor: two different rows hash to different cursors", () => {
   assert.notEqual(computeCursor(row("a")), computeCursor(row("b")));
+});
+
+// Gate finding (HIGH, catalog/history.ts:95): before HistoryEntry carried a
+// per-occurrence `id`, two DISTINCT rows that happened to match on every
+// other field (same action/status/timestamp — plausible for two lifecycle
+// events landing in the same millisecond) hashed identically, so
+// computeFeedResponse's anchor search could match the wrong occurrence and
+// silently drop one of them from a delta. `id` closes that: it's the one
+// field that's never equal across two independent recordEvent calls.
+test("computeCursor: two rows identical in every field except id hash differently", () => {
+  const a = row("x", { id: "occurrence-a" });
+  const b = row("x", { id: "occurrence-b" });
+  assert.notEqual(computeCursor(a), computeCursor(b));
+});
+
+test("computeFeedResponse: two occurrences identical except id both surface correctly in a delta — neither shadows the other", () => {
+  const older = row("x", { id: "occurrence-a" });
+  const newer = row("x", { id: "occurrence-b" }); // structurally identical to `older` except id
+  const after = computeCursor(older);
+
+  const result = computeFeedResponse([newer, older], after);
+
+  assert.equal(result.reset, false);
+  assert.deepEqual(result.events, [newer], "only the new occurrence should be in the delta — the anchor itself must not reappear");
 });
 
 test("computeFeedResponse: no after (initial snapshot) returns newest 100, reset true, cursor of row 0", () => {
