@@ -2,14 +2,13 @@
 
 import { useEffect, useState } from "react";
 
-import { usePolling } from "@/lib/use-polling";
+import { useEventFeed } from "@/lib/use-event-feed";
 import { relativeTime } from "@/lib/relative-time";
 import { formatEtTime } from "@/lib/et-time";
 import { StatusBadge } from "@/components/status-badge";
-import type { HistoryEntry } from "@/lib/catalog-types";
 
 export default function EventsPage() {
-  const { data: events, error, loading } = usePolling<HistoryEntry[]>("/api/events", []);
+  const { events, error, loading } = useEventFeed();
 
   // Ticks once a second purely to re-render the "Xs ago" column — the data
   // itself only refreshes on the 2s poll in usePolling.

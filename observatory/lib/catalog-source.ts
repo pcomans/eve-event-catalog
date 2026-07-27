@@ -1,4 +1,4 @@
-import type { ConversationRecord, HistoryEntry, Subscription } from "./catalog-types.ts";
+import type { ConversationRecord, EventFeedResponse, HistoryEntry, Subscription } from "./catalog-types.ts";
 
 // Server-only: the eve app's base URL for its public, unauthenticated GETs
 // (GET /catalog/subscriptions, GET /catalog/events). Not a secret — it's
@@ -19,6 +19,14 @@ export function fetchSubscriptions(signal?: AbortSignal) {
 
 export function fetchEvents(signal?: AbortSignal) {
   return getJson<HistoryEntry[]>("/catalog/events", signal);
+}
+
+// Cursor-polling companion to fetchEvents — see GET /catalog/event-feed
+// (agent/channels/catalog.ts) and catalog/event-feed.ts for the wire
+// contract and delta semantics this just proxies.
+export function fetchEventFeed(after: string | null, signal?: AbortSignal) {
+  const query = after !== null ? `?after=${encodeURIComponent(after)}` : "";
+  return getJson<EventFeedResponse>(`/catalog/event-feed${query}`, signal);
 }
 
 /**
