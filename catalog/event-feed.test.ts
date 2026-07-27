@@ -53,14 +53,19 @@ test("computeCursor: two rows identical in every field except id hash differentl
 });
 
 test("computeFeedResponse: two occurrences identical except id both surface correctly in a delta — neither shadows the other", () => {
-  const older = row("x", { id: "occurrence-a" });
-  const newer = row("x", { id: "occurrence-b" }); // structurally identical to `older` except id
-  const after = computeCursor(older);
+  // Anchored on a THIRD, older row — distinct from both new occurrences —
+  // so this actually exercises the delta path for two structurally
+  // identical rows, rather than anchoring on one of the pair itself (which
+  // would only prove the other one survives).
+  const anchor = row("anchor-sub");
+  const newerA = row("x", { id: "occurrence-a" });
+  const newerB = row("x", { id: "occurrence-b" }); // structurally identical to newerA except id
+  const after = computeCursor(anchor);
 
-  const result = computeFeedResponse([newer, older], after);
+  const result = computeFeedResponse([newerB, newerA, anchor], after);
 
   assert.equal(result.reset, false);
-  assert.deepEqual(result.events, [newer], "only the new occurrence should be in the delta — the anchor itself must not reappear");
+  assert.deepEqual(result.events, [newerB, newerA], "both otherwise-identical occurrences must appear in the delta, newest-first");
 });
 
 test("computeFeedResponse: no after (initial snapshot) returns newest 100, reset true, cursor of row 0", () => {
