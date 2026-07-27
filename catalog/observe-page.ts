@@ -191,12 +191,33 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
     body.innerHTML = rows.join("");
   }
 
+  // Self-chaining rather than a fixed setInterval, same reasoning as
+  // useEventFeed/usePolling in the Next observatory (and the same
+  // generation-guard idiom the transcript panel already uses below,
+  // watchGeneration/stopCurrentStream): the next fetch is scheduled only
+  // once this one settles, so a slow response (e.g. a cold Redis
+  // connection) can never overlap with a newer one. The generation counter
+  // is a second, belt-and-suspenders guard in case a response still arrives
+  // out of order — it just makes a genuinely stale response a no-op instead
+  // of letting it paint over what a newer poll already rendered.
+  var subsPollGeneration = 0;
+
   function pollSubs() {
-    if (document.hidden) return;
+    if (document.hidden) {
+      setTimeout(pollSubs, SUBS_POLL_MS);
+      return;
+    }
+    var generation = ++subsPollGeneration;
     fetch("/catalog/subscriptions")
       .then(function (r) { return r.json(); })
-      .then(renderSubs)
-      .catch(function () {});
+      .then(function (subs) {
+        if (generation !== subsPollGeneration) return; // superseded by a newer poll
+        renderSubs(subs);
+      })
+      .catch(function () {})
+      .finally(function () {
+        setTimeout(pollSubs, SUBS_POLL_MS);
+      });
   }
 
   // --- Event feed panel (cursor-polled — GET /catalog/event-feed) ---
@@ -226,17 +247,36 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
   // (already newest-first) rows onto the front. Same merge rule as the
   // observatory's mergeEventFeedWindow (observatory/lib/event-feed-window.ts),
   // just capped at 20 here instead of 100 — this panel only ever shows 20.
+  //
+  // Gate finding (MEDIUM, this file): a fixed setInterval had no in-flight
+  // guard, so a slow response could let a newer response advance the cursor
+  // and window first, and then have the older response arrive and rewind
+  // the cursor + prepend an overlapping/stale delta — duplicated or
+  // out-of-order rows, and valid entries evicted from the 20-row window.
+  // Self-chaining (schedule the next fetch only once this one settles, same
+  // as pollSubs above) removes the overlap outright; the generation guard
+  // is the same belt-and-suspenders backstop.
+  var eventPollGeneration = 0;
+
   function pollEvents() {
-    if (document.hidden) return;
+    if (document.hidden) {
+      setTimeout(pollEvents, EVENT_POLL_MS);
+      return;
+    }
+    var generation = ++eventPollGeneration;
     var query = eventFeedCursor !== null ? "?after=" + encodeURIComponent(eventFeedCursor) : "";
     fetch("/catalog/event-feed" + query)
       .then(function (r) { return r.json(); })
       .then(function (feed) {
+        if (generation !== eventPollGeneration) return; // superseded by a newer poll — must not rewind the cursor/window
         eventFeedCursor = feed.cursor;
         eventWindow = (feed.reset ? feed.events : feed.events.concat(eventWindow)).slice(0, EVENT_WINDOW_SIZE);
         renderEvents(eventWindow);
       })
-      .catch(function () {});
+      .catch(function () {})
+      .finally(function () {
+        setTimeout(pollEvents, EVENT_POLL_MS);
+      });
   }
 
   // --- Live transcript panel ---
@@ -500,10 +540,10 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
     watch(initial);
   }
 
+  // Both loops now reschedule themselves (see the self-chaining comment
+  // above pollSubs) — no setInterval needed here.
   pollSubs();
   pollEvents();
-  setInterval(pollSubs, SUBS_POLL_MS);
-  setInterval(pollEvents, EVENT_POLL_MS);
 })();
 </script>
 </body>
