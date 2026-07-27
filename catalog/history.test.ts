@@ -6,10 +6,11 @@ import { Redis } from "@upstash/redis";
 import { computeCursor } from "./event-feed.ts";
 import { fetchEventFeed, listEvents, recordEvent } from "./history.ts";
 
-// These tests hit the real Redis history list (catalog:events) — the same
-// list the running dev server appends to — so, like registry.test.ts, every
-// entry here carries a unique randomUUID subscriptionId and assertions find
-// that one entry rather than asserting exact list contents/length.
+// These tests hit real Redis (Upstash) — see the disposable-key contract
+// below (testEventsKey) before assuming otherwise. Every entry carries a
+// unique randomUUID subscriptionId, so — like registry.test.ts — assertions
+// find that one entry within a key rather than asserting exact list
+// contents/length.
 const baseSub = () => ({
   id: `sub:${randomUUID()}`,
   conversationId: `test:${randomUUID()}`,
