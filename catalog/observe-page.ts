@@ -111,7 +111,7 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
 <body>
 <header>
   <h1>Event Catalog — Live Observatory</h1>
-  <span class="sub">read-only, auto-refreshing every 2s</span>
+  <span class="sub">read-only, events every 2s (cursor-polled), subscriptions every 10s</span>
 </header>
 <main>
   <div class="left">
@@ -148,7 +148,14 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
 </main>
 <script>
 (function () {
-  var POLL_MS = 2000;
+  // Task: event-feed cursor migration — subscriptions no longer need 2s
+  // cadence now that the higher-traffic event feed below is cursor-polled;
+  // the registry itself changes far less often. Both loops skip their fetch
+  // entirely while the tab is hidden — the same bandwidth goal that
+  // motivated this whole migration applies just as much to this inline page
+  // as to the Next observatory.
+  var SUBS_POLL_MS = 10000;
+  var EVENT_POLL_MS = 2000;
 
   function esc(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -185,21 +192,25 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
   }
 
   function pollSubs() {
+    if (document.hidden) return;
     fetch("/catalog/subscriptions")
       .then(function (r) { return r.json(); })
       .then(renderSubs)
       .catch(function () {});
   }
 
-  // --- Event feed panel ---
+  // --- Event feed panel (cursor-polled — GET /catalog/event-feed) ---
+  var EVENT_WINDOW_SIZE = 20;
+  var eventFeedCursor = null; // opaque content-hash cursor; null until the first response
+  var eventWindow = []; // local rolling window, newest-first, capped at EVENT_WINDOW_SIZE
+
   function renderEvents(events) {
     var body = document.getElementById("eventsBody");
-    var top = events.slice(0, 20);
-    if (!top.length) {
+    if (!events.length) {
       body.innerHTML = '<tr><td colspan="4"><div class="empty">No events yet.</div></td></tr>';
       return;
     }
-    var rows = top.map(function (e) {
+    var rows = events.map(function (e) {
       return "<tr>" +
         "<td class=\\"mono dim\\">" + esc((e.timestamp || "").slice(11, 19)) + "</td>" +
         "<td>" + esc(e.action) + "</td>" +
@@ -210,10 +221,21 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
     body.innerHTML = rows.join("");
   }
 
+  // A reset response (initial load, or the server saying our cursor fell
+  // out of its window) replaces eventWindow outright; a delta prepends its
+  // (already newest-first) rows onto the front. Same merge rule as the
+  // observatory's mergeEventFeedWindow (observatory/lib/event-feed-window.ts),
+  // just capped at 20 here instead of 100 — this panel only ever shows 20.
   function pollEvents() {
-    fetch("/catalog/events")
+    if (document.hidden) return;
+    var query = eventFeedCursor !== null ? "?after=" + encodeURIComponent(eventFeedCursor) : "";
+    fetch("/catalog/event-feed" + query)
       .then(function (r) { return r.json(); })
-      .then(renderEvents)
+      .then(function (feed) {
+        eventFeedCursor = feed.cursor;
+        eventWindow = (feed.reset ? feed.events : feed.events.concat(eventWindow)).slice(0, EVENT_WINDOW_SIZE);
+        renderEvents(eventWindow);
+      })
       .catch(function () {});
   }
 
@@ -480,8 +502,8 @@ export const OBSERVE_PAGE_HTML = `<!doctype html>
 
   pollSubs();
   pollEvents();
-  setInterval(pollSubs, POLL_MS);
-  setInterval(pollEvents, POLL_MS);
+  setInterval(pollSubs, SUBS_POLL_MS);
+  setInterval(pollEvents, EVENT_POLL_MS);
 })();
 </script>
 </body>
