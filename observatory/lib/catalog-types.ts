@@ -40,6 +40,14 @@ export interface HistoryEntry {
   [key: string]: unknown;
 }
 
+// Mirrors catalog/event-feed.ts's EventFeedResponse — the cursor-polling
+// wire shape for GET /catalog/event-feed and its proxy, GET /api/event-feed.
+export interface EventFeedResponse {
+  cursor: string | null;
+  reset: boolean;
+  events: HistoryEntry[];
+}
+
 // Mirrors catalog/registry.ts's ConversationRecord (the conversationId ->
 // sessionId link GET /catalog/conversations/:conversationId returns).
 export interface ConversationRecord {

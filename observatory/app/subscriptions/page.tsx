@@ -38,8 +38,17 @@ function ConversationCell({ id }: { id: string }) {
   return <MonoTooltip full={id}>{short(id)}</MonoTooltip>;
 }
 
+// Task: event-feed cursor migration — subscriptions no longer need 2s
+// cadence now that the higher-traffic Event Feed poll is cursor-based
+// (useEventFeed); the registry itself changes far less often.
+const SUBSCRIPTIONS_POLL_MS = 10_000;
+
 export default function SubscriptionsPage() {
-  const { data: subscriptions, error, loading } = usePolling<Subscription[]>("/api/subscriptions", []);
+  const { data: subscriptions, error, loading } = usePolling<Subscription[]>(
+    "/api/subscriptions",
+    [],
+    SUBSCRIPTIONS_POLL_MS,
+  );
 
   // Same tiebreak as the eve app's inline observe page: the registry
   // returns Redis-set order, which shuffles every poll.

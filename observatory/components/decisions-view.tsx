@@ -10,10 +10,18 @@ import {
 } from "@/components/ai-elements/conversation";
 import { DecisionMessage } from "@/components/decision-message";
 import { TimelineEvent } from "@/components/timeline-event";
-import type { ConversationRecord, HistoryEntry, Subscription } from "@/lib/catalog-types";
+import type { ConversationRecord, Subscription } from "@/lib/catalog-types";
 import { interleaveTimeline } from "@/lib/interleave-timeline";
 import { usePolling } from "@/lib/use-polling";
+import { useEventFeed } from "@/lib/use-event-feed";
 import { useSessionTranscript } from "@/lib/use-session-transcript";
+
+// Subscriptions no longer need 2s cadence now that the Event Feed half of
+// this timeline is cursor-polled (useEventFeed) — see
+// /tmp/codex-eventdriven-final.txt's migration step 3. The registry itself
+// changes far less often than the event stream, and this is the only
+// remaining plain usePolling() call left on this page.
+const SUBSCRIPTIONS_POLL_MS = 10_000;
 
 // The caller (app/decisions/page.tsx) renders this keyed on conversationId
 // — `<DecisionsView key={conversationId} .../>` — so a conversationId
@@ -67,9 +75,9 @@ export function DecisionsView({ conversationId }: { conversationId: string }) {
   }, [conversationId]);
 
   const { messages, error: streamError } = useSessionTranscript(conversation?.sessionId ?? null);
-  // Reuses the same self-chaining/abort-safe poll as the Event Feed page —
-  // no separate fetch logic needed for the catalog-event half of the timeline.
-  const { data: allEvents } = usePolling<HistoryEntry[]>("/api/events", []);
+  // Reuses the same cursor-polling hook as the Event Feed page — no separate
+  // fetch logic needed for the catalog-event half of the timeline.
+  const { events: allEvents } = useEventFeed();
   const events = allEvents.filter((e) => e.conversationId === conversationId);
   const timeline = interleaveTimeline(messages, events);
 
@@ -90,7 +98,7 @@ export function DecisionsView({ conversationId }: { conversationId: string }) {
     data: subscriptions,
     error: subscriptionsError,
     loading: subscriptionsLoading,
-  } = usePolling<Subscription[]>("/api/subscriptions", []);
+  } = usePolling<Subscription[]>("/api/subscriptions", [], SUBSCRIPTIONS_POLL_MS);
   const subscriptionsById = new Map(subscriptions.map((s) => [s.id, s]));
 
   const error = resolveError ?? streamError;
