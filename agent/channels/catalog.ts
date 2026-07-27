@@ -19,7 +19,7 @@ import {
 } from "#catalog/wake.ts";
 import { assertCatalogHonesty } from "#catalog/catalog.ts";
 import { assertCatalogApiSecretConfigured, isAuthorizedHeader } from "#catalog/auth.ts";
-import { listEvents } from "#catalog/history.ts";
+import { fetchEventFeed, listEvents } from "#catalog/history.ts";
 import { createCachedReader } from "#catalog/read-cache.ts";
 import { incrementAndCheckTurnCap } from "#catalog/turn-cap.ts";
 // Side-effecting imports: register the alpaca and edgar providers
@@ -337,6 +337,20 @@ export default defineChannel({
     GET("/catalog/events", async () => {
       const events = await readEventsCached();
       return Response.json(events);
+    }),
+
+    // Additive cursor-polling companion to GET /catalog/events (task:
+    // event-feed cursor): `?after=<opaque-cursor>` returns only the rows
+    // newer than that cursor instead of the whole capped list every poll.
+    // Deliberately NOT wrapped in createCachedReader like the two GETs
+    // above — the response depends on the caller's own `after`, so a shared
+    // single-slot cache would serve one caller's delta to every other
+    // caller. Public, unauthenticated, read-only — same openness as
+    // /catalog/events (history.ts: "No secrets belong here").
+    GET("/catalog/event-feed", async (req) => {
+      const after = new URL(req.url).searchParams.get("after");
+      const feed = await fetchEventFeed(after);
+      return Response.json(feed);
     }),
 
     // Resolves a conversationId to its sessionId — used by the observatory
