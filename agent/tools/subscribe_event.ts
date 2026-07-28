@@ -18,7 +18,8 @@ export default defineTool({
     "a still-planned provider, or params that fail the schema) is returned as the tool result with the " +
     "specific problem named — read it and correct the call in this same turn rather than repeating it " +
     "unchanged. After a successful call: tell the user, in one sentence, what you're waiting for and " +
-    "until when, then end your turn — do not loop, sleep, or re-check yourself. The Event Catalog wakes " +
+    "until when; once every subscription this turn needs has been made (subscribing to several " +
+    "events in one turn is normal), end your turn — do not loop, sleep, or re-check yourself. The Event Catalog wakes " +
     "this same conversation with a \"[event-catalog wake]\" message (carrying that event type's own " +
     "onWake guidance) when the predicate fires or the subscription expires.",
   inputSchema: z.object({
