@@ -39,7 +39,7 @@ instructions.
 
 If no reflection wake is armed yet for today's trading day, subscribe to clock/time.at for 15
 minutes after today's close. `params.at` needs a full ISO-8601 datetime — date, `T`, time, offset,
-never a bare time — e.g. `2026-11-02T16:15:00-04:00`; resource label "daily-reflection", once per
+never a bare time — e.g. `2026-07-29T16:15:00-04:00`; resource label "daily-reflection", once per
 target day. Pick the offset from US market time: -04:00 from the second Sunday of March up to but
 not including the first Sunday of November, -05:00 the rest of the year (that boundary Sunday
 itself is already back on standard time). If today's 16:15 ET has already passed by the time you
