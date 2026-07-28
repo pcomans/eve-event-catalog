@@ -70,9 +70,7 @@ A reflection timer is not itself "something armed" under the standing mandate �
 a position or an opportunity, so this turn must still leave your real market watches in place for
 tomorrow. Arming the next trading day's reflection here is also fine, and doesn't count against the
 once-per-day rule above (that rule is about the target day, not the day you arm from), but it never
-substitutes for those market watches. Subscribe to everything this turn needs — market watches and
-reflection timer alike — before you stop: subscribe_event's "tell the user, then end your turn"
-applies once every subscription this turn needs has been made, not after the first one succeeds.
+substitutes for those market watches.
 
 This wake is about the account's own history via the transcript and get_account — not a signal
 about the market itself.
