@@ -3,6 +3,10 @@
 Sharp edges discovered while building on eve 0.22.5 (beta). Read this before touching channel
 code or running a demo.
 
+Numbering note: there are two entries numbered **14** ("Assorted" and the multi-instance
+one), left as-is so existing cross-references keep resolving. New entries continue from the
+highest number used, so #19 is followed by #20.
+
 ## 1. Channel event handlers can silently stop firing after a hot reload
 
 eve re-resolves channel `events` handlers from a registry keyed by channel "kind" on every
@@ -341,3 +345,74 @@ next command, no restart needed. Follow-up tracked (task #33): throttle per-tick
 writes and audit sweep command counts, since on paid this is now a cost knob, not a quota
 cliff. Quick check when Redis-backed features die weirdly: `grep 'max requests limit'` in
 the dev server log.
+
+## 20. The production agent lost the ability to EMIT required tool-call params — an encoding failure, not context loss
+
+From **2026-08-07** the `campaign-6` agent could no longer produce a required argument in a
+tool call. It kept working perfectly on every event type that requires none. This is a
+model/serving-layer failure, not a catalog, prompt, or context failure, and the point of
+this entry is that three plausible explanations are already **disproven** — do not spend a
+night re-deriving them.
+
+**The discriminator (visible in one read-only query, `GET /catalog/subscriptions`)**: event
+types with **no required params** arm fine — `edgar.filing.new` and `alpaca.order.filled`
+are still arming today. Event types **with** required params always fail: the agent sends
+`{}` where `alpaca.price.crossesBelow`/`crossesAbove` need `threshold` and `clock.time.at`
+needs `at`, and `subscribe()` rejects it, so the subscription never reaches the registry.
+campaign-6's last successful threshold subscription is **2026-08-06T13:30Z**; every
+subscription it has created since is a zero-required-param one. The cleanest single data
+point: on 2026-08-10T13:32Z its JPM/MAR/CAT stops had expired, and it re-armed **zero**
+threshold watches while arming **two** `edgar.filing.new` watches in the same turn.
+
+**Open thread worth pulling first (spotted 2026-08-12 while writing this up)**: the registry
+holds **zero** `clock.time.at` rows — ever, across all 77 subscriptions since 2026-07-15 —
+even though the daily-reflection instructions that tell the agent to arm one landed
+2026-08-02 and the first reflection wake was expected 2026-08-03, four days BEFORE the
+08-07 onset. Either the agent never attempted one (instruction never followed / not
+deployed) or `clock.time.at` was already failing pre-08-07, which would break the gateway
+timing story below. Check the 08-03…08-06 turns for an attempted `clock.time.at` call
+before treating 08-07 as the onset date.
+
+**Disproven — context compaction (this was the original diagnosis; it is false).** Compaction
+has NEVER run on this project. eve's threshold is 90% of a 1,000,000-token window and steady
+state is ~155,000 tokens; there are no compaction events anywhere in 25 days of session
+history. The agent also never lost the schema: it made **54** correct threshold subscriptions
+between 2026-07-15 and 2026-08-06 (verifiable — every one carries a numeric `threshold` in
+the live registry), working the whole time from a single `search_events` result up to 23 days
+old. Losing a schema it had held for three weeks, on one day, for exactly the event types
+that need it, is not what compaction looks like.
+
+**Disproven — the agent doesn't know the value.** On **2026-08-10T04:25Z** an operator handed
+it the exact correct JSON in the message immediately preceding the call. It emitted `{}`
+anyway and then reported: *"The params I actually sent were {} (empty object) despite
+intending {"threshold": 300}"*. It knows what it means to send and cannot serialize it.
+
+**Disproven — in-context imitation** (the theory that a transcript full of `{}` calls teaches
+it to keep emitting `{}`): a probe seeded with repeated prior failures did **not** reproduce
+the behavior.
+
+**Unproven, and the current best suspect: the serving provider behind the Vercel AI Gateway.**
+Around **2026-08-05** the gateway fell back from DeepSeek to **Fireworks** for
+`deepseek-v4-pro`; per-call cost jumped ~$0.0008 → ~$0.02–0.27. Failures began 08-07. The
+timing fits and the failure shape (structured-output/tool-argument encoding degrading while
+plain text stays coherent) is the shape a different serving stack produces. That is
+circumstantial. It is NOT established.
+
+**What would confirm it**: (a) capture the raw model response at the moment of a `{}` call —
+LangSmith trace or the gateway response body — to establish whether the arguments string is
+empty **on the wire** or is being lost downstream in eve's tool-call parsing; and (b) replay
+the same turn against DeepSeek directly (or a gateway request pinned to a specific upstream
+provider) and diff the emitted tool-call JSON. Either one alone is close to decisive; both
+together settle it.
+
+**Blocker as of 2026-08-12**: the gateway credit balance hit zero. Market-open turns now fail
+outright with `MODEL_CALL_FAILED` — *"A positive credit balance is required for all
+requests"* — so no replay is possible until billing is topped up. A dead campaign right now
+is this, not the encoding bug; check the balance before diagnosing anything else.
+
+**The fix that isn't.** `subscribe()`'s rejections were made self-correcting on 2026-08-12
+(the params rejection now carries the event's full JSON Schema; the unknown-event-type
+rejection lists the whole catalog). That is worth keeping — a rejection naming a missing
+field without supplying the schema is a genuine dead end for any confused caller — but it
+demonstrably did not fix THIS, and the code comments say so. An agent that cannot serialize
+an argument it is looking at cannot be helped by better error text.
