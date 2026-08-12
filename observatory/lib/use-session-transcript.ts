@@ -31,9 +31,13 @@ export type StreamEnd =
   /** The session itself is over — nothing will ever be appended again. */
   | { readonly kind: "terminal" }
   /** The body ended cleanly, but the session is still live or parked. */
-  | { readonly kind: "closed" }
+  | { readonly kind: "closed"; readonly published: boolean }
   /** The request or the read failed. */
-  | { readonly kind: "failed"; readonly message: string };
+  | { readonly kind: "failed"; readonly message: string; readonly published: boolean };
+// `published` = this connection actually delivered events. It is half of the
+// "was that connection healthy?" test the reconnect policy applies; see
+// createReconnectPolicy for why duration alone and delivery alone are each
+// insufficient.
 
 /**
  * eve emits exactly two events that mean "this session's durable stream will
@@ -73,10 +77,11 @@ export async function drainSessionStream(options: {
   let data = reducer.initial();
   const firstSeenAt = new Map<string, string>();
   let terminal = false;
+  let published = false;
 
   try {
     const res = await fetchStream(`/api/sessions/${encodeURIComponent(sessionId)}/stream`, { signal });
-    if (!res.ok || !res.body) return { kind: "failed", message: `stream ${res.status}` };
+    if (!res.ok || !res.body) return { kind: "failed", message: `stream ${res.status}`, published };
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
@@ -110,37 +115,61 @@ export async function drainSessionStream(options: {
         }
       }
       if (lines.length > 0) {
+        published = true;
         onMessages(data.messages.map((message) => ({ message, at: firstSeenAt.get(message.id) ?? "" })));
       }
     }
   } catch (err) {
-    return { kind: "failed", message: err instanceof Error ? err.message : String(err) };
+    // Terminality survives a late read error. The upstream closes immediately
+    // after a terminal event, so a hiccup on that last chunk is a real (if
+    // narrow) window — and forgetting we saw session.failed there would
+    // reconnect into exactly the storm this module exists to prevent.
+    if (terminal) return { kind: "terminal" };
+    return { kind: "failed", message: err instanceof Error ? err.message : String(err), published };
   }
 
-  return terminal ? { kind: "terminal" } : { kind: "closed" };
+  return terminal ? { kind: "terminal" } : { kind: "closed", published };
 }
 
-/** Decides how long to wait before the next reconnect, or to stop trying. */
+/** Decides how long to wait before the next reconnect. */
 export interface ReconnectPolicy {
   /**
-   * Records a connection that ended without the session being over, given how
-   * long it was held; returns the delay before the next attempt, or `null`
-   * once this hook should stop reconnecting altogether.
+   * Records a connection that ended without the session being over; returns
+   * the delay before the next attempt, and whether the ladder is exhausted
+   * (i.e. we are now trickling at the cap rather than genuinely retrying).
    */
-  next(heldMs: number): number | null;
+  next(outcome: { heldMs: number; published: boolean }): { delayMs: number; exhausted: boolean };
 }
 
+/**
+ * Never gives up, and that is deliberate. An earlier version returned `null`
+ * after MAX_ATTEMPTS to retire the loop — but a failed fetch rejects in ~0ms,
+ * so a routine wifi drop, lid close, or eve redeploy burns all seven
+ * connections in ~2 minutes and the transcript would then stay dead for the
+ * life of the tab, on a dashboard meant to be left open unattended. The old
+ * code self-healed in 2s. Flooring at MAX_RETRY_MS keeps ~96% of the win
+ * (~120 invocations/hour against the storm's ~3,000) and leaves `null`
+ * meaning exactly one thing: the session is over.
+ *
+ * Health takes BOTH a long-enough connection and delivered events. Neither
+ * alone works: duration alone lets an upstream that accepts, stalls 30s and
+ * closes empty reset the ladder forever; delivery alone is worse still, since
+ * the incident shape — replay the full history, close in 0.4s — publishes
+ * every time and would reset the ladder into an unbounded 2s loop.
+ */
 export function createReconnectPolicy(): ReconnectPolicy {
   let attempts = 0;
   return {
-    next(heldMs) {
-      // A connection that stayed open and delivering wasn't a flap — most
-      // likely the proxy route's own maxDuration cut a live stream — so the
-      // ladder starts over rather than punishing a healthy page.
-      if (heldMs >= HEALTHY_MS) attempts = 0;
+    next({ heldMs, published }) {
+      // Held open AND delivering: not a flap, most likely the proxy route's
+      // own maxDuration cutting a live stream. Start the ladder over rather
+      // than punishing a healthy page.
+      if (heldMs >= HEALTHY_MS && published) attempts = 0;
       attempts += 1;
-      if (attempts > MAX_ATTEMPTS) return null;
-      return Math.min(FIRST_RETRY_MS * 2 ** (attempts - 1), MAX_RETRY_MS);
+      return {
+        delayMs: Math.min(FIRST_RETRY_MS * 2 ** (attempts - 1), MAX_RETRY_MS),
+        exhausted: attempts > MAX_ATTEMPTS,
+      };
     },
   };
 }
@@ -198,8 +227,11 @@ export function useSessionTranscript(sessionId: string | null) {
     const controller = new AbortController();
     const policy = createReconnectPolicy();
     // Read by the interval getter below, written by each connection's
-    // outcome. `null` retires the loop.
-    let nextDelayMs: number | null = FIRST_RETRY_MS;
+    // outcome. `null` retires the loop, and now means ONLY "the session is
+    // over" — every other ending keeps a delay. Assigned on every path
+    // through the run before the getter is consulted (the getter runs in the
+    // loop's finally, strictly after the awaited run resolves).
+    let nextDelayMs: number | null;
 
     let firstAttempt = true;
 
@@ -231,9 +263,10 @@ export function useSessionTranscript(sessionId: string | null) {
         return;
       }
       const reason = end.kind === "failed" ? end.message : "stream closed without ending the session";
-      nextDelayMs = policy.next(Date.now() - startedAt);
-      if (nextDelayMs === null) {
-        setError(`${reason} — gave up reconnecting after ${MAX_ATTEMPTS} attempts, reload to retry`);
+      const { delayMs, exhausted } = policy.next({ heldMs: Date.now() - startedAt, published: end.published });
+      nextDelayMs = delayMs;
+      if (exhausted) {
+        setError(`${reason} — still retrying every ${Math.round(MAX_RETRY_MS / 1000)}s; reload for an immediate retry`);
       } else if (end.kind === "failed") {
         setError(reason);
       }

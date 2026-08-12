@@ -89,7 +89,7 @@ test("drainSessionStream: session.waiting is a PARKED session, not a terminal on
 
   // A parked session accepts future turns, so an ended connection here is a
   // dropped/cut connection, not the end of the session — reconnecting is right.
-  assert.deepEqual(end, { kind: "closed" });
+  assert.deepEqual(end, { kind: "closed", published: true });
 });
 
 test("drainSessionStream: a clean end with no terminal marker is 'closed', not terminal", async () => {
@@ -100,7 +100,7 @@ test("drainSessionStream: a clean end with no terminal marker is 'closed', not t
     fetchStream: async () => ndjsonResponse([line(userMessage)]),
   });
 
-  assert.deepEqual(end, { kind: "closed" });
+  assert.deepEqual(end, { kind: "closed", published: true });
 });
 
 test("drainSessionStream: projects messages across chunk boundaries, timestamped by first sighting", async () => {
@@ -148,48 +148,97 @@ test("drainSessionStream: a non-ok response is a failure, not a clean end", asyn
     fetchStream: async () => new Response("nope", { status: 502 }),
   });
 
-  assert.deepEqual(end, { kind: "failed", message: "stream 502" });
+  assert.deepEqual(end, { kind: "failed", message: "stream 502", published: false });
 });
+
+// Delivers each chunk on its own read, THEN errors. Erroring inside start()
+// discards anything already enqueued, which would make "it had published
+// before the failure" untestable — and that distinction is exactly what the
+// reconnect policy keys off.
+function deliverThenFail(chunks: readonly string[], message: string): Response {
+  const encoder = new TextEncoder();
+  let sent = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent < chunks.length) controller.enqueue(encoder.encode(chunks[sent++]));
+      else controller.error(new Error(message));
+    },
+  });
+  return new Response(body, { status: 200 });
+}
 
 test("drainSessionStream: a mid-body read error is a failure", async () => {
   const sink = collector();
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode(line(userMessage)));
-      controller.error(new Error("network error"));
-    },
-  });
   const end = await drainSessionStream({
     sessionId: "s1",
     onMessages: sink.onMessages,
-    fetchStream: async () => new Response(body, { status: 200 }),
+    fetchStream: async () => deliverThenFail([line(userMessage)], "network error"),
   });
 
-  assert.deepEqual(end, { kind: "failed", message: "network error" });
+  // It published before the error, and that is recorded — the reconnect
+  // policy needs to know whether the connection was doing anything.
+  assert.deepEqual(end, { kind: "failed", message: "network error", published: true });
 });
+
+test("drainSessionStream: a terminal event followed by a read error is still terminal", async () => {
+  const sink = collector();
+  const end = await drainSessionStream({
+    sessionId: "s1",
+    onMessages: sink.onMessages,
+    fetchStream: async () => deliverThenFail([line(sessionFailed)], "connection reset on the last chunk"),
+  });
+
+  // The upstream closes immediately after a terminal event, so an error on
+  // that last chunk is a real window. Forgetting we saw session.failed here
+  // would reconnect into exactly the storm this module exists to prevent.
+  assert.deepEqual(end, { kind: "terminal" });
+});
+
+const flap = { heldMs: 300, published: true };
 
 test("createReconnectPolicy: backs off exponentially from 2s and caps at 60s", () => {
   const policy = createReconnectPolicy();
-  const delays = [0, 0, 0, 0, 0, 0].map(() => policy.next(300));
+  const delays = [0, 0, 0, 0, 0, 0].map(() => policy.next(flap).delayMs);
 
   assert.deepEqual(delays, [2_000, 4_000, 8_000, 16_000, 32_000, 60_000]);
 });
 
-test("createReconnectPolicy: gives up rather than retrying at a fixed rate forever", () => {
+test("createReconnectPolicy: trickles at the cap instead of giving up forever", () => {
   const policy = createReconnectPolicy();
-  for (let i = 0; i < 6; i += 1) policy.next(300);
+  for (let i = 0; i < 6; i += 1) policy.next(flap);
 
-  assert.equal(policy.next(300), null, "a stream that only ever flaps must stop costing invocations");
+  // Retiring here would strand the transcript for the life of the tab after a
+  // ~2 minute wifi drop, on a dashboard meant to be left open unattended. The
+  // cap keeps ~96% of the saving and still self-heals.
+  const exhausted = policy.next(flap);
+  assert.equal(exhausted.delayMs, 60_000);
+  assert.equal(exhausted.exhausted, true, "the caller needs to know it is trickling, to say so on screen");
 });
 
-test("createReconnectPolicy: a connection that held open resets the backoff", () => {
+test("createReconnectPolicy: a healthy connection — long AND delivering — resets the backoff", () => {
   const policy = createReconnectPolicy();
-  policy.next(300);
-  policy.next(300);
-  policy.next(300);
+  policy.next(flap);
+  policy.next(flap);
+  policy.next(flap);
 
   // The legitimate reconnect: the proxy's own maxDuration cut a genuinely
-  // live stream after it had been delivering for a long time. That is not a
-  // flap, so the next attempt starts from the bottom of the ladder again.
-  assert.equal(policy.next(700_000), 2_000);
+  // live stream after it had been delivering for a long time.
+  assert.equal(policy.next({ heldMs: 700_000, published: true }).delayMs, 2_000);
+});
+
+test("createReconnectPolicy: neither duration nor delivery alone counts as healthy", () => {
+  // Long but silent — an upstream that accepts, stalls, then closes empty.
+  // Resetting on duration alone would let it reconnect forever.
+  const stalling = createReconnectPolicy();
+  stalling.next(flap);
+  stalling.next({ heldMs: 700_000, published: false });
+  assert.equal(stalling.next(flap).delayMs, 8_000, "a stalled empty connection must not reset the ladder");
+
+  // Delivering but instant — the incident's own shape: replay the whole
+  // history, close in 0.4s. Resetting on delivery alone would rebuild the
+  // unbounded 2s loop this module exists to remove.
+  const replaying = createReconnectPolicy();
+  replaying.next(flap);
+  replaying.next({ heldMs: 400, published: true });
+  assert.equal(replaying.next(flap).delayMs, 8_000, "a fast full-history replay must not reset the ladder");
 });
