@@ -454,3 +454,47 @@ rejection lists the whole catalog). That is worth keeping — a rejection naming
 field without supplying the schema is a genuine dead end for any confused caller — but it
 demonstrably did not fix THIS, and the code comments say so. An agent that cannot serialize
 an argument it is looking at cannot be helped by better error text.
+
+## 21. A reconnect in a `finally` cannot tell "the session ended" from "the connection dropped"
+
+The observatory's transcript hook rescheduled its own reconnect from a `finally`, so a clean
+end-of-stream and a dropped connection took the exact same path. That is invisible while
+sessions are live — the upstream holds the connection open, nothing ever ends, the loop never
+spins. It becomes a billing incident the moment a session goes **terminal**: the server hands
+back the full history and closes immediately, so the client re-downloads it forever.
+
+Measured 2026-08-12 against `campaign-6`'s failed session: **held 0.4s / 0.6s / 0.3s, 5,631
+bytes each**, i.e. a reconnect every ~2.4s ≈ **1,500/hour per open tab**. `/api/sessions/:id/
+stream` proxies to the eve service, so that is **~3,000 function invocations/hour per tab**,
+which is what tripped Vercel's anomaly alerting. Against the *previous* 25-day session
+(11,896 events, 7.7 MB) the same loop would have moved ~11 GB/hour per tab.
+
+**Terminality is in-band and unambiguous** — `session.completed` and `session.failed` are the
+only two events that mean the durable run is over; `session.waiting` means **parked** and the
+stream stays open for future turns (verified in eve's `harness/emission.js`: `emitFailedStep`
+emits `step.failed` → `turn.failed` → `session.failed`, while `emitRecoverableFailedTurn`
+ends at `session.waiting`). eve's own client already had this right: `openStreamIterable`
+reconnects only on a disconnect error, never on a clean end.
+
+**Three safeguards, and one alone is not enough.** Terminal detection stops the storm. Capped
+backoff bounds every *other* failure, including a session that ends without journaling a
+marker. Visibility gating means a backgrounded tab costs nothing. Two further traps found in
+review, both worth knowing before writing the next retry loop:
+
+- **Never retire on repeated failure.** An earlier version gave up after 6 attempts. A failed
+  `fetch` rejects in ~0ms, so a routine wifi drop or redeploy burns the whole ladder in ~2
+  minutes and then the page is dead for the life of the tab. Floor at the cap instead; ~120
+  invocations/hour still keeps ~96% of the saving, and `null` is left to mean only "the
+  session is over".
+- **"Healthy connection" needs duration AND delivery.** Resetting the backoff on duration
+  alone lets an upstream that accepts, stalls and closes empty reconnect forever. Resetting on
+  delivery alone is worse — the incident's own shape (replay everything, close in 0.4s)
+  publishes every single time and would rebuild the unbounded loop.
+
+The deeper cause is still open: the stream has **no cursor**, so every reconnect replays from
+index 0. eve supports it (`getEventStream(sessionId, {startIndex})`, and its own channel route
+parses `?startIndex=`); `agent/channels/catalog.ts` just calls it with no options. Roughly 15
+lines across four files, but it spans the live eve service and trades "replay from 0 is
+idempotent by construction" for "the client's count must match the server's index", so it
+wants its own gate. Its urgency dropped sharply once terminal sessions stopped replaying 1,500
+times an hour.
