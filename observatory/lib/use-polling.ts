@@ -2,17 +2,17 @@
 
 import { useEffect, useState } from "react";
 
+import { startPollLoop } from "./poll-loop.ts";
+
 const DEFAULT_POLL_MS = 2000;
 
-// Self-chaining poll, not a fixed setInterval: the next fetch is only
-// scheduled once the previous one settles (success or failure), so a
-// hung/slow proxy or eve upstream can never stack concurrent requests or
-// let a late response overwrite newer data. Unmount aborts whatever fetch
-// is in flight via the shared AbortController instead of only suppressing
-// its eventual state update — the /api/* route handlers forward this
-// request's signal into their own eve fetch (lib/catalog-source.ts), so the
-// abort propagates through the proxy and cancels the proxy-to-eve request
-// too, not just the browser-to-proxy leg.
+// Re-fetches `path` on the shared poll loop (poll-loop.ts): one request at a
+// time, and nothing at all — not even a timer — while the tab is hidden.
+// Unmount aborts whatever fetch is in flight via the shared AbortController
+// instead of only suppressing its eventual state update — the /api/* route
+// handlers forward this request's signal into their own eve fetch
+// (lib/catalog-source.ts), so the abort propagates through the proxy and
+// cancels the proxy-to-eve request too, not just the browser-to-proxy leg.
 export function usePolling<T>(path: string, initial: T, intervalMs: number = DEFAULT_POLL_MS) {
   const [data, setData] = useState<T>(initial);
   const [error, setError] = useState<string | null>(null);
@@ -20,10 +20,9 @@ export function usePolling<T>(path: string, initial: T, intervalMs: number = DEF
 
   useEffect(() => {
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
 
-    async function poll() {
+    const stop = startPollLoop(async () => {
       try {
         const res = await fetch(path, { signal: controller.signal });
         if (!res.ok) throw new Error(`${path} -> ${res.status}`);
@@ -35,18 +34,14 @@ export function usePolling<T>(path: string, initial: T, intervalMs: number = DEF
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-          timer = setTimeout(poll, intervalMs);
-        }
+        if (!cancelled) setLoading(false);
       }
-    }
+    }, intervalMs);
 
-    poll();
     return () => {
       cancelled = true;
       controller.abort();
-      if (timer) clearTimeout(timer);
+      stop();
     };
   }, [path, intervalMs]);
 
