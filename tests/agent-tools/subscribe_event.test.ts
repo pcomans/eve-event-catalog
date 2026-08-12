@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { asSchema } from "ai";
+import Ajv from "ajv";
+
 import subscribeEvent from "../../agent/tools/subscribe_event.ts";
 import catalogData from "../../catalog/catalog.json" with { type: "json" };
 
@@ -9,16 +12,27 @@ import catalogData from "../../catalog/catalog.json" with { type: "json" };
 // *.test.ts file there breaks `pnpm dev`/`pnpm build` outright.
 //
 // What these tests are about: the JSON Schema the MODEL sees for `params`.
-// eve compiles a tool's Zod `inputSchema` to draft-07 JSON Schema at build
-// time (`compileToolEntry` -> `normalizeJsonSchemaDefinition`, eve
-// dist/src/compiler/normalize-tool.js + dist/src/shared/json-schema.js) and
-// bakes the result into the manifest the provider is handed. Declared as
-// `z.record(z.string(), z.unknown())`, `params` compiles to an object with
-// NO declared properties -- nothing for a streaming tool-call argument parser
-// to bind to, which is the leading hypothesis for the production symptom
-// where the agent intends `{"threshold": 300}` and an empty object arrives
-// (2026-08-10; every event type requiring params failed, every one requiring
-// none succeeded).
+// There are TWO conversions of the same Zod schema and they do not agree:
+//
+//   compile time -- inputSchema["~standard"].jsonSchema.input({target}), what
+//     eve bakes into the build manifest. Emits "additionalProperties": {}.
+//   RUNTIME ------- what the provider is actually handed. eve resolves
+//     `inputSchema: r.inputStandardSchema ?? jsonSchema(...)` (eve
+//     dist/src/execution/node-step.js, resolveHarnessToolDefinition), i.e. the
+//     LIVE Zod schema, which goes tool() -> asSchema -> zod4Schema ->
+//     z4.toJSONSchema -> addAdditionalPropertiesToJsonSchema
+//     (@ai-sdk/provider-utils), and that last step force-sets
+//     "additionalProperties": FALSE on every object, unconditionally.
+//
+// That divergence IS the 2026-08-07 production bug (KNOWN_ISSUES #20). With
+// `params` declared `z.record(z.string(), z.unknown())` the runtime schema was
+//   {"type":"object","propertyNames":{"type":"string"},"additionalProperties":false}
+// -- additionalProperties:false plus zero declared properties admits exactly
+// one value, `{}`. A provider doing constrained tool decoding (Fireworks)
+// physically could not emit `{"threshold": 300}`; the manifest, meanwhile,
+// looked permissive. So the assertions that matter run against the RUNTIME
+// conversion; a test written against the compile-time one passes happily on
+// the broken schema and proves nothing.
 //
 // These tests read catalog.json directly, so they also serve as the drift
 // guard AGENTS.md rule 4 demands: catalog.json is the single source of truth,
@@ -84,15 +98,65 @@ test("no-params event types can still send an empty params object", () => {
 });
 
 // Ajv (catalog/catalog.ts subscribe()) is the single enforcement point for
-// what is legal. The tool's schema exists to give the model named fields to
-// bind to, and must stay strictly MORE permissive than Ajv -- otherwise a
-// rejection happens somewhere that can't quote catalog.json's schema back,
-// and two validators drift apart.
-test("the tool's schema does not second-guess Ajv: cross-event and unknown params pass through", () => {
+// what is legal. Zod's job here is only to give the model named fields to
+// bind to and then get out of the way, so anything that DOES arrive reaches
+// subscribe() and gets Ajv's rejection -- the one that quotes catalog.json's
+// schema back and can be acted on in the same turn.
+//
+// Note the deliberate asymmetry, and do not "fix" it: Zod stays loose, but
+// the schema the model is SHOWN is closed (additionalProperties:false, forced
+// by the AI SDK and not opt-out-able -- see the runtime test below). So this
+// is about what survives the parse, not about what the model may send.
+test("Zod stays loose so anything that arrives still reaches Ajv", () => {
   const at = "2027-01-04T14:30:00Z";
   // `at` belongs to clock.time.at, not alpaca.price.crossesBelow: Ajv's job.
   assert.deepEqual(parseCall({ at }), { at });
   // A field no catalog entry declares must still reach subscribe(), so the
   // rejection the model reads is Ajv's (which quotes the full schema).
   assert.deepEqual(parseCall({ notAField: 1 }), { notAField: 1 });
+});
+
+/**
+ * The assertion that would have caught the incident, and the only one here
+ * that runs against the schema the provider is ACTUALLY handed.
+ *
+ * Every test above uses eve's compile-time conversion. That conversion emitted
+ * `"additionalProperties": {}` for the broken free-form schema and so looked
+ * harmless; the runtime path emitted `"additionalProperties": false`, which
+ * against zero declared properties admits exactly one value -- `{}`. A
+ * provider that decodes tool calls against the schema could not emit a
+ * threshold at all. Tests written against the compile-time conversion passed
+ * happily throughout (KNOWN_ISSUES #20).
+ *
+ * So this asserts the property that actually matters -- a real threshold
+ * VALIDATES against the emitted schema -- and pins the counterfactual: the
+ * same schema stripped of its declared properties rejects it. Without that
+ * second half the test would still pass on a property-less schema whose
+ * additionalProperties the AI SDK had merely stopped closing.
+ */
+test("the RUNTIME schema handed to the provider actually admits a threshold", () => {
+  const runtimeParams = (
+    asSchema(subscribeEvent.inputSchema as never).jsonSchema.properties as Record<string, Record<string, unknown>>
+  ).params;
+
+  assert.equal(
+    (runtimeParams.properties as Record<string, { type?: unknown }>)?.threshold?.type,
+    "number",
+    `runtime params schema declares no typed threshold. Emitted: ${JSON.stringify(runtimeParams)}`,
+  );
+
+  const ajv = new Ajv({ strict: false });
+  assert.ok(
+    ajv.compile(runtimeParams)({ threshold: 300 }),
+    `the model cannot send a threshold: {"threshold":300} is invalid against ${JSON.stringify(runtimeParams)}`,
+  );
+
+  // The counterfactual — the exact shape that broke production.
+  const withoutProperties = { ...runtimeParams };
+  delete withoutProperties.properties;
+  assert.equal(
+    ajv.compile(withoutProperties)({ threshold: 300 }),
+    false,
+    "expected a property-less closed object to reject a threshold — if this passes, additionalProperties is no longer being closed and this test has stopped guarding anything",
+  );
 });
