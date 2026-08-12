@@ -18,6 +18,9 @@ interface ParamFieldSchema {
   description?: string;
 }
 
+const showType = (schema: ParamFieldSchema): string =>
+  schema.type === "array" ? `array of ${schema.items?.type}` : `${schema.type}`;
+
 function zodForJsonType(schema: ParamFieldSchema, field: string): z.ZodType {
   switch (schema.type) {
     case "string":
@@ -39,33 +42,46 @@ function zodForJsonType(schema: ParamFieldSchema, field: string): z.ZodType {
 
 /**
  * Builds `params`' input schema from catalog.json instead of declaring it a
- * free-form record. eve compiles this Zod schema to JSON Schema at build
- * time (`compileToolEntry`, eve dist/src/compiler/normalize-tool.js) and
- * that JSON Schema is all the model's provider ever sees — and
- * `z.record(z.string(), z.unknown())` compiles to an object with NO declared
- * properties (`{"type":"object","propertyNames":{"type":"string"},
- * "additionalProperties":{}}`), leaving a streaming tool-call argument
- * parser nothing to bind values to. That matches the production symptom
- * exactly (2026-08-07 onward): every event type REQUIRING params got
- * `params: {}` while every event type requiring none armed fine, with the
- * model itself reporting it had intended to send the right value. Named,
- * typed fields are the fix hypothesis.
+ * free-form record. `z.record(z.string(), z.unknown())` declares NO
+ * properties, and what the model was actually handed for it was
+ * `{"type":"object","propertyNames":{"type":"string"},"additionalProperties":false}`
+ * — an object schema that admits exactly ONE value, `{}`. That is the proven
+ * cause of the 2026-08-07 production incident (KNOWN_ISSUES #20): every event
+ * type REQUIRING params got `params: {}` while every event type requiring
+ * none armed fine, because `{}` was the only value the model was permitted to
+ * emit. Named, typed properties are the fix.
  *
  * Generated, never hand-listed: catalog.json stays the single source of
  * truth (AGENTS.md rule 4), so a param field added there is described to the
  * model without a matching edit here and the two cannot drift apart.
  *
- * Deliberately permissive — every field optional, no value constraints
- * (threshold's exclusiveMinimum, `at`'s futureDatetime, per-event required[],
- * additionalProperties: false) and unknown keys passed through. subscribe()'s
- * Ajv validators, compiled from the same catalog.json, stay the ONLY place
- * params are judged: they reject with the offending field AND the full schema
- * quoted, which the model can act on inside the same turn. A second, partial
- * validator here would only produce worse rejections for the same inputs.
+ * What the model sees is CLOSED, and we cannot make it otherwise. eve hands
+ * the provider the LIVE Zod schema at runtime (`resolveHarnessToolDefinition`,
+ * eve dist/src/execution/node-step.js: `inputSchema: r.inputStandardSchema ??
+ * jsonSchema(...)`), not the build-time manifest, and on the way out the AI
+ * SDK's `addAdditionalPropertiesToJsonSchema` (@ai-sdk/provider-utils)
+ * force-sets `additionalProperties: false` on every object — unconditionally,
+ * no opt-out. So the advertised field set IS the complete field set, and a
+ * provider that decodes tool calls against the schema (Fireworks does; the
+ * incident is what that looks like) can emit nothing else. Declaring every
+ * catalog field here is therefore not tidiness, it is the difference between
+ * sendable and unsendable.
+ *
+ * Zod, by contrast, stays loose on purpose — `z.looseObject`, every field
+ * optional, no value constraints (threshold's exclusiveMinimum, `at`'s
+ * futureDatetime, per-event required[]) — so whatever DOES arrive is passed
+ * through untouched. subscribe()'s Ajv validators, compiled from the same
+ * catalog.json, stay the ONLY place params are judged: they reject with the
+ * offending field AND the full schema quoted, which the model can act on
+ * inside the same turn. A second, partial validator here would only produce
+ * worse rejections for the same inputs.
  */
 function buildParamsSchema(): z.ZodType<Record<string, unknown>> {
   const declared = new Map<string, { schema: ParamFieldSchema; owners: string[] }>();
   for (const eventType of EVENT_TYPES) {
+    // subscribe() rejects "planned" entries outright, so describing their
+    // params to the model would advertise what isn't implemented (rule 4).
+    if (eventType.status === "planned") continue;
     const properties = (eventType.params.properties ?? {}) as Record<string, ParamFieldSchema>;
     for (const [field, schema] of Object.entries(properties)) {
       const existing = declared.get(field);
@@ -73,12 +89,13 @@ function buildParamsSchema(): z.ZodType<Record<string, unknown>> {
         declared.set(field, { schema, owners: [`${eventType.provider}.${eventType.event}`] });
         continue;
       }
-      // One field name, one type — otherwise a single declared property
-      // would have to lie about one of the event types that uses it.
-      if (existing.schema.type !== schema.type) {
+      // One field name, one type — otherwise a single declared property would
+      // have to lie about one of the event types that uses it. `items.type`
+      // counts: array-of-string and array-of-number are different declarations.
+      if (existing.schema.type !== schema.type || existing.schema.items?.type !== schema.items?.type) {
         throw new Error(
-          `catalog.json declares param "${field}" as "${existing.schema.type}" for ` +
-            `${existing.owners.join(", ")} but as "${schema.type}" for ${eventType.provider}.${eventType.event}.`,
+          `catalog.json declares param "${field}" as "${showType(existing.schema)}" for ` +
+            `${existing.owners.join(", ")} but as "${showType(schema)}" for ${eventType.provider}.${eventType.event}.`,
         );
       }
       existing.owners.push(`${eventType.provider}.${eventType.event}`);
@@ -90,7 +107,18 @@ function buildParamsSchema(): z.ZodType<Record<string, unknown>> {
       field,
       zodForJsonType(schema, field)
         .optional()
-        .describe(`For ${owners.join(", ")}. ${schema.description ?? ""}`.trim()),
+        // One owner: its prose is unambiguously about this field. Several
+        // owners: it isn't, and picking the first one's prose would state
+        // something false about the others — `threshold`'s description is
+        // directional, and direction is the entire difference between
+        // price.crossesBelow and price.crossesAbove. Point at the per-event
+        // schema instead of guessing (rule 4: never tell the model something
+        // that isn't so).
+        .describe(
+          owners.length === 1
+            ? `For ${owners[0]}. ${schema.description ?? ""}`.trim()
+            : `For ${owners.join(", ")} — see the per-event JSON Schema from search_events for this field's exact meaning.`,
+        ),
     ]),
   );
   return z.looseObject(shape);
