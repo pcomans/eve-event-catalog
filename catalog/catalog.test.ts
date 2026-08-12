@@ -102,6 +102,38 @@ test("subscribe rejects an unknown provider/event pair before touching the regis
   );
 });
 
+/**
+ * The twin of the schema-echo test below, minus its history: a bare "unknown
+ * event type" says what was wrong and nothing else, so a caller holding a
+ * slightly wrong name has nowhere to go from the rejection. No production
+ * incident is behind this one — the catalog is small and knowable, so the dead
+ * end is cheap to close, and that is the whole case for it.
+ */
+test("subscribe's unknown-event-type rejection lists the catalog's event types, so a misremembered name self-corrects", async () => {
+  const available = EVENT_TYPES.map((e) => `${e.provider}.${e.event}`).join(", ");
+
+  await assert.rejects(
+    () =>
+      subscribe({
+        conversationId: "test:unknown-event-lists-catalog",
+        provider: "alpaca",
+        event: "price.dropsBelow", // A plausible near-miss, not nonsense: the shape a bad recall actually takes.
+        resource: "NVDA",
+        params: { threshold: 150 },
+      }),
+    (err: Error) => {
+      assert.match(err.message, /unknown event type: alpaca\.price\.dropsBelow/);
+      // Derived from EVENT_TYPES, so this pins "lists whatever the catalog
+      // holds" rather than today's five entries.
+      assert.ok(
+        err.message.includes(available),
+        `expected the rejection to list the catalog's event types, got: ${err.message}`,
+      );
+      return true;
+    },
+  );
+});
+
 test("subscribe rejects a 'planned' event type immediately, before validating params", async () => {
   // All of catalog.json is "active" as of task #8 — temporarily flip edgar
   // back to "planned" to exercise this rejection path (withPlannedEventType).
@@ -133,6 +165,49 @@ test("subscribe rejects params that fail the event type's JSON Schema, naming th
           params: { threshold: "not-a-number" },
         }),
       /threshold/,
+    ),
+  );
+});
+
+/**
+ * Naming the missing field without supplying the schema is a dead end for any
+ * caller that doesn't already hold the schema: the rejection says what broke,
+ * never what to send. Carrying the schema makes the next attempt need no
+ * memory and no re-search. That is the entire justification for this test.
+ *
+ * It is NOT the fix for the incident that prompted it (KNOWN_ISSUES #20), and
+ * that is recorded here so the next reader doesn't inherit a false cause:
+ * from 2026-08-07 the production agent emitted `params: {}` for every event
+ * type with a required field while arming zero-param types (edgar.filing.new,
+ * alpaca.order.filled) correctly in the same turn, and on 2026-08-10 did it
+ * with the correct JSON in front of it. Nothing the rejection text says
+ * reaches that failure.
+ */
+test("subscribe's params rejection carries the event type's schema, so the model can correct without re-searching", async () => {
+  const { params: schema } = EVENT_TYPES.find((e) => e.provider === "alpaca" && e.event === "price.crossesBelow")!;
+
+  await withActiveEventType("alpaca", "price.crossesBelow", () =>
+    assert.rejects(
+      () =>
+        subscribe({
+          conversationId: "test:rejection-carries-schema",
+          provider: "alpaca",
+          event: "price.crossesBelow",
+          resource: "NVDA",
+          // The production call: the one required field, omitted.
+          params: {},
+        }),
+      (err: Error) => {
+        assert.match(err.message, /must have required property 'threshold'/);
+        // The whole schema verbatim, not a summary and not just the field
+        // name — the constraints and the field description are what let a
+        // model rebuild the call from the rejection alone.
+        assert.ok(
+          err.message.includes(JSON.stringify(schema)),
+          `expected the rejection to quote the full params schema, got: ${err.message}`,
+        );
+        return true;
+      },
     ),
   );
 });

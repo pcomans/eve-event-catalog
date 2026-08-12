@@ -179,7 +179,24 @@ function formatAjvErrors(validate: ValidateFunction): string {
  */
 export async function subscribe(input: SubscribeInput): Promise<Subscription> {
   const eventType = findEventType(input.provider, input.event);
-  if (!eventType) throw new Error(`unknown event type: ${input.provider}.${input.event}`);
+  if (!eventType) {
+    // Same argument as the params rejection below, applied to the name: a bare
+    // "unknown event type" says what was wrong and nothing else, so a caller
+    // that has the name slightly wrong has no route from the error to a correct
+    // retry. Listed from EVENT_TYPES rather than written out, so the catalog
+    // stays the one source of truth. Five entries cost ~110 characters, which
+    // is free; somewhere around fifty this stops being a sensible thing to
+    // paste into every rejection and wants ranking (search() already does
+    // that) — the number where that flips is a judgment for whoever is looking
+    // at the catalog when it grows, not something to guess at now. Unlike its
+    // twin below, this half answers no production incident: it's here because
+    // the dead end is the same shape and the catalog is small enough to say.
+    throw new Error(
+      `unknown event type: ${input.provider}.${input.event}. ` +
+        `The catalog holds: ${EVENT_TYPES.map((e) => `${e.provider}.${e.event}`).join(", ")}. ` +
+        `Call subscribe_event again with one of those — re-running search_events is not needed.`,
+    );
+  }
 
   if (eventType.status === "planned") {
     throw new Error(
@@ -190,7 +207,25 @@ export async function subscribe(input: SubscribeInput): Promise<Subscription> {
 
   const validate = validators.get(`${input.provider}.${input.event}`)!;
   if (!validate(input.params)) {
-    throw new Error(`invalid params for ${input.provider}.${input.event}: ${formatAjvErrors(validate)}`);
+    // The schema travels with the rejection, not just the bad field's name:
+    // "must have required property 'threshold'" says what broke, never what to
+    // send instead, so a caller that doesn't already hold the schema has no
+    // route from the error to a correct retry. That stands on its own.
+    //
+    // It did NOT fix the production incident that prompted it (2026-08-07
+    // onward, KNOWN_ISSUES #20) and this comment exists so nobody re-derives a
+    // causal story it can't support. campaign-6 stopped being able to EMIT a
+    // required param at all — clean on every event type with no required
+    // params, `{}` on every event type with one — and on 2026-08-10T04:25Z it
+    // sent `{}` while an operator's message held the exact correct JSON, then
+    // reported having intended `{"threshold": 300}`. A more helpful rejection
+    // is one more thing that agent read and could not act on; the break is
+    // upstream of anything this string can say.
+    throw new Error(
+      `invalid params for ${input.provider}.${input.event}: ${formatAjvErrors(validate)}. ` +
+        `Full params schema: ${JSON.stringify(eventType.params)}. ` +
+        `Fix params to match it and call subscribe_event again — re-running search_events is not needed.`,
+    );
   }
 
   const newSubscription: NewSubscriptionInput = {
