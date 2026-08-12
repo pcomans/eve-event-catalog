@@ -14,7 +14,19 @@ import { deliverExpiredWakeFromConnector } from "../lib/deliver-wake.ts";
 // local dev — one code path per host, not replaced — this workflow is the
 // OTHER host's path, for anywhere a serverless eve instance can recycle
 // between a subscription arming and its expiresAt arriving.
-const SWEEP_INTERVAL_MS = 30_000;
+// Exported so the supervisor-headroom invariant is checkable against the
+// real number (tests/connector-workflows/sweep-cadence.test.ts).
+//
+// Cost decision (Philipp, 2026-08-09): 60s, not the 30s this ran at from
+// Phase 3 until now — ~14,400 workflow events/day became ~7,200. Nothing
+// in the expiry contract is sub-minute: `expiresAt` is a user/agent-chosen
+// horizon (hours to days), the sweep only ever fires wakes that are
+// ALREADY overdue, and an "expired" wake is a notification that a watch
+// ended, not a deadline anyone acts on within the minute. The cost is that
+// an expiry can now land up to ~60s after its own expiresAt instead of
+// ~30s — no correctness property depends on the difference (nothing reads
+// expiresAt for anything but this sweep's own due-index read).
+export const EXPIRY_SWEEP_INTERVAL_MS = 60_000;
 // Smoke-test override, same convention as edgar-sweep.ts's own
 // EDGAR_SWEEP_TICKS_PER_RUN — shrinks the TICK COUNT only, never the sleep
 // duration, so a preview smoke test can observe a chain handoff without
@@ -55,7 +67,7 @@ export async function expirySweepWorkflow(): Promise<never> {
 
   for (let i = 0; i < SWEEP_TICKS_PER_RUN; i++) {
     await sweepStep();
-    await sleep(SWEEP_INTERVAL_MS);
+    await sleep(EXPIRY_SWEEP_INTERVAL_MS);
   }
 
   await startNextRun(runNonce);

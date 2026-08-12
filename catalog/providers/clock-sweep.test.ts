@@ -275,7 +275,7 @@ test("reconcileClockDueIndex: a not-yet-due armed clock subscription missing fro
 // Redis rejects it, and because reconciliation is awaited BEFORE the
 // due-read in runClockSweepTick, an UNCAUGHT throw here would have aborted
 // the ENTIRE tick — one malformed row starving every OTHER valid due clock
-// wake behind it forever, every ~30s. The fix validates the computed score
+// wake behind it forever, every ~60s. The fix validates the computed score
 // per row and skip-and-logs a malformed one rather than throwing, so a
 // poison row can never take the whole tick down with it.
 // p6i gate (2 HIGHs, same guard, two edges): the p6h fix's own

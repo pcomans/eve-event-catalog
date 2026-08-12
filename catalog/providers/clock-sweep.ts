@@ -13,11 +13,13 @@ import { addClockDue, readDueClockSubscriptionIds, removeClockDue } from "./cloc
 // batch-read the rows, attempt a "fired" delivery for each.
 //
 // KNOWN ACCEPTED LIMIT: connector-mode delivery is only as fresh as the
-// sweep's own cadence (30s, connector/workflows/clock-sweep.ts) — a wake
-// can land up to ~30s late relative to its own `at`, versus setTimeout's
-// sub-second precision locally. Fine for this catalog's semantics (a
-// clock.time.at wake is "wake me around this time," not a hard real-time
-// deadline) — not engineered tighter (AGENTS.md rule 1).
+// sweep's own cadence (60s, connector/workflows/clock-sweep.ts — 30s until
+// the 2026-08-09 cost change) — a wake can land up to ~60s late relative to
+// its own `at`, versus setTimeout's sub-second precision locally, and
+// catalog.json's clock.time.at metadata advertises exactly that number to
+// the agent. Fine for this catalog's semantics (a clock.time.at wake is
+// "wake me around this time," not a hard real-time deadline) — not
+// engineered tighter (AGENTS.md rule 1).
 //
 // Safe under a LOCAL timer and this DURABLE sweep racing the SAME
 // subscription for the exact same reason every other sweep in this
@@ -118,7 +120,7 @@ async function listArmedClockSubscriptionsFromRegistry(): Promise<Subscription[]
  * Design choice (per-tick, not chain-start-only): cost is one extra
  * listSubscriptions() call — one SMEMBERS + one batched MGET, same shape as
  * the N+1 fix task #33 already did for the listing/expiry-sweep paths, not
- * a per-subscription GET loop — every ~30s. Chosen over a chain-start-only
+ * a per-subscription GET loop — every ~60s. Chosen over a chain-start-only
  * backfill because it keeps self-healing for the FULL lifetime of a running
  * clock sweep chain (weeks, per the workflow's own supervisor model), not
  * just the moment right after a fresh deploy; a crash-window row that slips
@@ -239,7 +241,7 @@ export async function runClockSweepTick(
     // delivered, is left "armed" (no status change — this is a corrupt
     // due-index entry, not a decision about the subscription itself), and
     // is removed from the index so it isn't silently re-logged and
-    // re-attempted every ~30s tick forever.
+    // re-attempted every ~60s tick forever.
     if (clockDueMsOf(sub) === null) {
       log(`clock-sweep-row-invalid sub=${id} — params.at is missing, not a string, or not a valid datetime (params=${JSON.stringify(sub.params)}); leaving it armed and removing the stale due-index entry rather than delivering a corrupt wake`);
       // p6k gate (MED): same isolation fix as the missing-row branch above

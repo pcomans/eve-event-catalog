@@ -15,7 +15,9 @@ import { deliverWakeFromConnector } from "../lib/deliver-wake.ts";
 // runEdgarSweepTick) followed by a durable sleep() — sleep()/run duration
 // are unlimited (gate 7), so this is the one place in the connector that
 // leans on durable sleep rather than a bounded Fluid-function-duration step.
-const SWEEP_INTERVAL_MS = 30_000; // matches edgar.ts's own POLL_INTERVAL_MS — AGENTS.md rule 3's ~30s freshness target
+// Exported so the supervisor-headroom invariant is checkable against the
+// real number (tests/connector-workflows/sweep-cadence.test.ts).
+export const EDGAR_SWEEP_INTERVAL_MS = 30_000; // matches edgar.ts's own POLL_INTERVAL_MS — AGENTS.md rule 3's ~30s freshness target
 // Smoke-test override (Phase 3 preview verification, 2026-07-13): the real
 // production cadence lets a smoke test shrink the TICK COUNT only — never
 // the sleep duration, since the whole point of the smoke test is watching
@@ -72,7 +74,7 @@ export async function edgarSweepWorkflow(): Promise<never> {
 
   for (let i = 0; i < SWEEP_TICKS_PER_RUN; i++) {
     await sweepStep();
-    await sleep(SWEEP_INTERVAL_MS);
+    await sleep(EDGAR_SWEEP_INTERVAL_MS);
   }
 
   await startNextRun(runNonce);
