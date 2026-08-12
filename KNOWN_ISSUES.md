@@ -346,12 +346,47 @@ writes and audit sweep command counts, since on paid this is now a cost knob, no
 cliff. Quick check when Redis-backed features die weirdly: `grep 'max requests limit'` in
 the dev server log.
 
-## 20. The production agent lost the ability to EMIT required tool-call params — an encoding failure, not context loss
+## 20. A free-form `z.record` tool field is UNSENDABLE: the AI SDK closes it, so only `{}` validates
 
 From **2026-08-07** the `campaign-6` agent could no longer produce a required argument in a
-tool call. It kept working perfectly on every event type that requires none. This is a
-model/serving-layer failure, not a catalog, prompt, or context failure, and the point of
-this entry is that three plausible explanations are already **disproven** — do not spend a
+tool call, while working perfectly on every event type that requires none. **Root cause: our
+own tool schema.** `subscribe_event`'s `params` was `z.record(z.string(), z.unknown())` —
+an object with no declared properties — and the AI SDK force-closes every object on the way
+out, so the schema the model was actually handed was:
+
+```json
+{"type":"object","propertyNames":{"type":"string"},"additionalProperties":false}
+```
+
+`additionalProperties: false` + zero declared properties admits **exactly one value: `{}`**.
+Verified with Ajv against the emitted schema: `{}` valid, `{"threshold":300}` **invalid**.
+A provider that decodes tool calls against the schema physically cannot emit a threshold —
+the agent was not confused, it was forbidden.
+
+Two details make this hard to see, and both are the real lesson:
+
+1. **The runtime schema is not the manifest schema.** eve hands the provider the LIVE Zod
+   schema (`resolveHarnessToolDefinition`, eve `dist/src/execution/node-step.js`:
+   `inputSchema: r.inputStandardSchema ?? jsonSchema(...)`), which goes `tool()` →
+   `asSchema` → `zod4Schema` → `z4.toJSONSchema` → **`addAdditionalPropertiesToJsonSchema`**
+   (`@ai-sdk/provider-utils`), and that last step sets `additionalProperties: false` on every
+   object, unconditionally, with no opt-out. eve's *compile-time* conversion emits
+   `additionalProperties: {}` instead — so the build manifest looked permissive throughout,
+   and any test written against it passed happily on the broken schema. **Assert against the
+   runtime conversion or you are testing nothing.**
+2. **It worked for three weeks first.** DeepSeek's stack evidently did not enforce the schema
+   (54 correct threshold subscriptions, 2026-07-15 → 08-06). Around **2026-08-05** the Vercel
+   AI Gateway fell back to **Fireworks**, which does constrained tool decoding, and the
+   latent defect became fatal on 08-07. `pnpm-lock.yaml` was unchanged since 2026-07-13, so
+   nothing was upgraded into this. The gateway change was the **trigger**, not the cause; a
+   provider switch can turn a permissive-looking schema bug into a hard outage overnight.
+
+**Fix**: declare real properties on `params`, generated from `catalog.json` at module load
+(`agent/tools/subscribe_event.ts`), so the advertised — and therefore sendable — field set is
+the catalog's field set. Because the advertised object is closed and cannot be opened, *every*
+catalog param field must be declared there or it is unsendable.
+
+Three plausible explanations were chased first and are **disproven** — do not spend another
 night re-deriving them.
 
 **The discriminator (visible in one read-only query, `GET /catalog/subscriptions`)**: event
@@ -364,14 +399,16 @@ subscription it has created since is a zero-required-param one. The cleanest sin
 point: on 2026-08-10T13:32Z its JPM/MAR/CAT stops had expired, and it re-armed **zero**
 threshold watches while arming **two** `edgar.filing.new` watches in the same turn.
 
-**Open thread worth pulling first (spotted 2026-08-12 while writing this up)**: the registry
-holds **zero** `clock.time.at` rows — ever, across all 77 subscriptions since 2026-07-15 —
+**A separate bug, found while investigating this one — do not conflate them.** The registry
+holds **zero** `clock.time.at` rows, ever, across all 77 subscriptions since 2026-07-15,
 even though the daily-reflection instructions that tell the agent to arm one landed
-2026-08-02 and the first reflection wake was expected 2026-08-03, four days BEFORE the
-08-07 onset. Either the agent never attempted one (instruction never followed / not
-deployed) or `clock.time.at` was already failing pre-08-07, which would break the gateway
-timing story below. Check the 08-03…08-06 turns for an attempted `clock.time.at` call
-before treating 08-07 as the onset date.
+2026-08-02. That is NOT this bug: a read of the full 25-day session transcript found zero
+mentions of reflection, notes, or a scoreboard across 89 turns, so the agent never
+*attempted* a clock subscription. The daily-reflection feature has never run once. It also
+asks the agent to *edit* a "Strategy notes" block that nothing defines and that the agent
+has no mechanism to edit — the transcript is append-only, and this project wires up neither
+eve's `defineState` nor its per-session `/workspace` filesystem. Worth its own entry when
+someone picks it up.
 
 **Disproven — context compaction (this was the original diagnosis; it is false).** Compaction
 has NEVER run on this project. eve's threshold is 90% of a 1,000,000-token window and steady
@@ -391,19 +428,20 @@ intending {"threshold": 300}"*. It knows what it means to send and cannot serial
 it to keep emitting `{}`): a probe seeded with repeated prior failures did **not** reproduce
 the behavior.
 
-**Unproven, and the current best suspect: the serving provider behind the Vercel AI Gateway.**
-Around **2026-08-05** the gateway fell back from DeepSeek to **Fireworks** for
-`deepseek-v4-pro`; per-call cost jumped ~$0.0008 → ~$0.02–0.27. Failures began 08-07. The
-timing fits and the failure shape (structured-output/tool-argument encoding degrading while
-plain text stays coherent) is the shape a different serving stack produces. That is
-circumstantial. It is NOT established.
+**Superseded — "the serving provider is at fault".** This was the leading suspect for a
+night, on the strength of the 08-05 DeepSeek → Fireworks gateway fallback (per-call cost
+~$0.0008 → ~$0.02–0.27) lining up with the 08-07 onset. It is half right and the wrong half
+is the expensive one: Fireworks exposed the bug, it did not cause it. Chasing the provider
+would have produced a pinned upstream, a restored agent, and a landmine still sitting in the
+repo waiting for the next provider that enforces schemas. **When a failure correlates with an
+infrastructure change, check whether the infrastructure merely stopped forgiving you.**
 
-**What would confirm it**: (a) capture the raw model response at the moment of a `{}` call —
-LangSmith trace or the gateway response body — to establish whether the arguments string is
-empty **on the wire** or is being lost downstream in eve's tool-call parsing; and (b) replay
-the same turn against DeepSeek directly (or a gateway request pinned to a specific upstream
-provider) and diff the emitted tool-call JSON. Either one alone is close to decisive; both
-together settle it.
+**How it was actually settled** — statically, in minutes, with no model call, while the
+gateway was out of credits: emit the tool's schema through the runtime path (`asSchema`) and
+validate a real argument against it with Ajv. `{"threshold":300}` was invalid. Reproducible
+in ~20 lines; see `tests/agent-tools/subscribe_event.test.ts` ("the RUNTIME schema handed to
+the provider actually admits a threshold"), which pins it and the counterfactual so a
+regression cannot pass silently.
 
 **Blocker as of 2026-08-12**: the gateway credit balance hit zero. Market-open turns now fail
 outright with `MODEL_CALL_FAILED` — *"A positive credit balance is required for all
