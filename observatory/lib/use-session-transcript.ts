@@ -14,9 +14,13 @@ import { startPollLoop } from "./poll-loop.ts";
 // reasons a connection ends without the session being over: the proxy's own
 // 800s maxDuration cutting a live stream (long-lived — not a flap, so the
 // ladder resets), versus a stream that ends the moment it opens (the incident
-// shape: 0.3–0.6s connections). MAX_ATTEMPTS bounds the total: 7 connections
-// over ~2 minutes, then the loop retires and says so, instead of billing
-// invocations at a fixed rate for as long as the tab stays open.
+// shape: 0.3–0.6s connections), which also has to have delivered events —
+// see createReconnectPolicy for why either test alone fails. MAX_ATTEMPTS is
+// NOT a give-up: after ~2 minutes the ladder simply sits at the 60s ceiling
+// and the hook says on screen that it is still retrying. Retiring here was
+// tried and reverted — a failed fetch rejects in ~0ms, so a routine wifi drop
+// burns every attempt in about two minutes and would strand the transcript
+// for the life of the tab.
 const FIRST_RETRY_MS = 2_000;
 const MAX_RETRY_MS = 60_000;
 const HEALTHY_MS = 30_000;
@@ -204,10 +208,11 @@ export function createReconnectPolicy(): ReconnectPolicy {
  * index 0, and each reconnect costs two function invocations (browser →
  * observatory proxy → eve). Measured against the terminal campaign-6 session:
  * ~2.4s per cycle, ~1,500 reconnects/hour/tab, ~3,000 invocations/hour/tab.
- * So now: a terminal end retires the loop for good, anything else backs off
- * exponentially (createReconnectPolicy) and gives up after MAX_ATTEMPTS, and
- * the loop itself is poll-loop.ts's — which means a hidden tab holds no timer
- * and reconnects nothing until someone looks at it again.
+ * So now: a terminal end — and ONLY a terminal end — retires the loop for
+ * good; anything else backs off exponentially and then trickles at the 60s
+ * ceiling (createReconnectPolicy), so a page that lost its connection still
+ * heals itself; and the loop itself is poll-loop.ts's, which means a hidden
+ * tab holds no timer and reconnects nothing until someone looks at it again.
  *
  * The one thing this gives up: when the campaign's conversation moves on to a
  * NEW session, this page won't notice by itself. It never did — decisions-view
