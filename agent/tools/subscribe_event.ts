@@ -67,14 +67,22 @@ function zodForJsonType(schema: ParamFieldSchema, field: string): z.ZodType {
  * catalog field here is therefore not tidiness, it is the difference between
  * sendable and unsendable.
  *
- * Zod, by contrast, stays loose on purpose — `z.looseObject`, every field
- * optional, no value constraints (threshold's exclusiveMinimum, `at`'s
- * futureDatetime, per-event required[]) — so whatever DOES arrive is passed
- * through untouched. subscribe()'s Ajv validators, compiled from the same
- * catalog.json, stay the ONLY place params are judged: they reject with the
- * offending field AND the full schema quoted, which the model can act on
- * inside the same turn. A second, partial validator here would only produce
- * worse rejections for the same inputs.
+ * Zod, by contrast, stays as loose as it can — `z.looseObject`, every field
+ * optional, and none of the VALUE constraints (threshold's exclusiveMinimum,
+ * `at`'s futureDatetime, per-event required[], per-event
+ * additionalProperties) — so cross-event and unknown keys reach subscribe()
+ * untouched and get Ajv's rejection, which quotes the offending field AND the
+ * full schema and can be acted on inside the same turn.
+ *
+ * It is not literally zero judgement, and the earlier version of this comment
+ * overclaimed: declaring a field's TYPE necessarily means Zod checks it, so
+ * `{"threshold":"300"}` is rejected here rather than by Ajv, with a worse
+ * message. That is the unavoidable price of declaring types at all, and
+ * declaring them is the whole fix. It costs nothing real: the types are
+ * generated from the same catalog.json Ajv compiles, so the two cannot
+ * disagree, and every such input was going to be rejected anyway. What must
+ * NOT appear here is a value constraint Ajv also owns — that is where two
+ * validators start drifting.
  */
 function buildParamsSchema(): z.ZodType<Record<string, unknown>> {
   const declared = new Map<string, { schema: ParamFieldSchema; owners: string[] }>();

@@ -38,9 +38,17 @@ import catalogData from "../../catalog/catalog.json" with { type: "json" };
 // guard AGENTS.md rule 4 demands: catalog.json is the single source of truth,
 // and a param field added there must show up in what the model is shown.
 
-// Every param field any catalog entry declares, name -> JSON Schema type.
+// Every param field an ACTIVE catalog entry declares, name -> JSON Schema
+// type. The "active" filter mirrors buildParamsSchema deliberately: a
+// "planned" entry has no working provider and subscribe() rejects it
+// outright, so advertising its params to the model would be advertising what
+// isn't implemented (rule 4). Without this filter the drift guard below would
+// fail a CORRECT implementation the moment someone adds an honest planned
+// entry with a new field — and the obvious way to "fix" that failure is to
+// start advertising planned fields, which is the thing rule 4 forbids.
 const catalogParamTypes = new Map<string, string>();
 for (const eventType of catalogData.eventTypes) {
+  if (eventType.status === "planned") continue;
   for (const [name, schema] of Object.entries(eventType.params.properties ?? {})) {
     catalogParamTypes.set(name, (schema as { type: string }).type);
   }
