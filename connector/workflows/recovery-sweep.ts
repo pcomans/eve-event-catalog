@@ -16,7 +16,28 @@ import { deliverStrandedWakeFromConnector } from "../lib/deliver-wake.ts";
 // workflow is the OTHER host's path, for wherever a serverless eve
 // instance can crash/recycle mid-delivery and never get to finish its own
 // sweep.
-const SWEEP_INTERVAL_MS = 15_000; // matches wake.ts's own startRecoverySweep default cadence
+// Exported so the supervisor-headroom invariant is checkable against the
+// real number (tests/connector-workflows/sweep-cadence.test.ts).
+//
+// Cost decision (Philipp, 2026-08-09): 60s, not the 15s this ran at from
+// Phase 3 until now. This chain is the single biggest line item in the
+// project's Vercel bill — at 15s it emitted ~28,800 workflow events/day
+// (5,760 ticks x [3-event step + 2-event sleep]), roughly 40% of the
+// project's whole ~72,400/day, and it does the identical amount of work
+// whether or not anything is subscribed. 60s cuts it to ~7,200/day.
+//
+// It used to say "matches wake.ts's own startRecoverySweep default
+// cadence". That coupling was prose, never code: nothing imports across
+// the two, wake.ts's startRecoverySweep(intervalMs = 15_000) is called
+// with no argument from agent/channels/catalog.ts and drives an
+// in-process setInterval in the LOCAL DEV eve process, while this workflow
+// is the production host's path. They are two hosts' stand-ins for the
+// same job and are free to run at different cadences; deliberately left
+// alone, since wake.ts is another agent's file and its cost is a dev
+// laptop's, not the bill's. What they must share is the delivery
+// semantics (tryTransitionToDelivering's CAS makes both safe when they
+// overlap), and that is untouched.
+export const RECOVERY_SWEEP_INTERVAL_MS = 60_000;
 // Smoke-test override, same convention as edgar-sweep.ts's
 // EDGAR_SWEEP_TICKS_PER_RUN / expiry-sweep.ts's EXPIRY_SWEEP_TICKS_PER_RUN —
 // shrinks the TICK COUNT only, never the sleep duration. Unset (falls back
@@ -56,7 +77,7 @@ export async function recoverySweepWorkflow(): Promise<never> {
 
   for (let i = 0; i < SWEEP_TICKS_PER_RUN; i++) {
     await sweepStep();
-    await sleep(SWEEP_INTERVAL_MS);
+    await sleep(RECOVERY_SWEEP_INTERVAL_MS);
   }
 
   await startNextRun(runNonce);

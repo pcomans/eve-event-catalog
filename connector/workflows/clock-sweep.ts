@@ -17,7 +17,19 @@ import { deliverWakeFromConnector } from "../lib/deliver-wake.ts";
 // a clock.time.at subscription arming and its `at` arriving (which, unlike
 // expiry/EDGAR, used to mean the wake NEVER fired at all on Vercel — no
 // durable path existed for it before this).
-const SWEEP_INTERVAL_MS = 30_000;
+// Cost decision (Philipp, 2026-08-09): 60s, not the 30s this ran at from
+// its launch-blocker fix until now — ~14,400 workflow events/day became
+// ~7,200.
+//
+// Exported because two things outside this file are load-bearing on this
+// number and must not drift from it. Unlike expiry/recovery, this cadence
+// IS advertised: catalog.json's clock.time.at metadata quotes it back to
+// the agent as the wake lateness to expect, so the constant and the promise
+// move together or the catalog lies (AGENTS.md rule 4). And the supervisor's
+// staleness tolerance below has to stay clear of it, or a healthy chain gets
+// a duplicate started alongside it. tests/connector-workflows/
+// sweep-cadence.test.ts asserts both.
+export const CLOCK_SWEEP_INTERVAL_MS = 60_000;
 // Smoke-test override, same convention as expiry-sweep.ts's own
 // EXPIRY_SWEEP_TICKS_PER_RUN — shrinks the TICK COUNT only, never the sleep
 // duration. Unset (falls back to 360) in production.
@@ -56,7 +68,7 @@ export async function clockSweepWorkflow(): Promise<never> {
 
   for (let i = 0; i < SWEEP_TICKS_PER_RUN; i++) {
     await sweepStep();
-    await sleep(SWEEP_INTERVAL_MS);
+    await sleep(CLOCK_SWEEP_INTERVAL_MS);
   }
 
   await startNextRun(runNonce);

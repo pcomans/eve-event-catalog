@@ -44,9 +44,9 @@ function resolveWatcherHost(value: string | undefined): "in-process" | "connecto
 // mode, arm()/disarm() instead register/remove the row in a durable
 // due-time index (catalog/providers/clock-redis.ts) that
 // catalog/providers/clock-sweep.ts's own connector-side sweep
-// (connector/workflows/clock-sweep.ts, 30s cadence) reads — see that
+// (connector/workflows/clock-sweep.ts, 60s cadence) reads — see that
 // module's own doc comment for the full mechanism and its one accepted
-// trade-off (up to ~30s wake lateness in connector mode vs. setTimeout's
+// trade-off (up to ~60s wake lateness in connector mode vs. setTimeout's
 // sub-second precision locally).
 //
 // One record per armed subscription, kept alive for the subscription's

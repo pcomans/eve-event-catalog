@@ -9,7 +9,7 @@ import { clockSweepWorkflow } from "../workflows/clock-sweep.ts";
 // Not explicitly requested by the launch-blocker task this route ships
 // alongside — added for consistency with every OTHER sweep's own manual
 // trigger sibling, and to give a way to smoke-test the fix directly rather
-// than only via the real 30s cadence or waiting for a real `at` to pass.
+// than only via the real 60s cadence or waiting for a real `at` to pass.
 // The real bootstrap/recovery path is ensure-clock-running.get.ts's
 // supervisor (Vercel Cron). Which subscriptions are due is read fresh from
 // clock-redis.ts's own due-time index every tick, so there's nothing to
